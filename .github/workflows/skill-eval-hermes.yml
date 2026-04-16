@@ -79,9 +79,7 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
-        run: |
-          pip install pyyaml
-          npm install -g agent-browser
+        run: pip install pyyaml
 
       - name: Install Hermes Agent
         run: |
