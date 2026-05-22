@@ -2,6 +2,7 @@
 """Two-phase Gemini CLI evaluation: task agent + evaluator agent."""
 import json, subprocess, os, datetime, yaml, re, sys
 from pathlib import Path
+from json import JSONDecoder
 
 run_dir = Path(os.environ["RUN_DIR"])
 cases = json.loads(Path("/tmp/gemini-eval-cases.json").read_text())
@@ -16,6 +17,37 @@ def run_gemini(prompt, timeout=600):
     if model_flag:
         cmd.extend(["--model", model_flag])
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def strip_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+
+def find_judgment_json(text):
+    cleaned = strip_ansi(text).strip()
+    if not cleaned:
+        return None
+
+    fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
+    for block in reversed(fence_matches):
+        try:
+            parsed = json.loads(block)
+            if isinstance(parsed, dict) and ("status" in parsed or "assertions" in parsed):
+                return parsed
+        except Exception:
+            pass
+
+    decoder = JSONDecoder()
+    for i, ch in enumerate(cleaned):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(cleaned[i:])
+            if isinstance(obj, dict) and ("status" in obj or "assertions" in obj):
+                return obj
+        except Exception:
+            continue
+    return None
 
 for case in cases:
     cid = case["case_id"]
@@ -141,18 +173,17 @@ for case in cases:
         "workspace_root": attempt_ws,
     }
 
-    json_match = re.search(r'\{[\s\S]*\}', eval_response)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group())
-            case_result.update({
-                "status": parsed.get("status", "blocked"),
-                "assertions": parsed.get("assertions", []),
-                "notes": parsed.get("notes", []),
-                "blocked_reason": None,
-            })
-        except Exception as e:
-            print(f"Judgment JSON parse error: {e}")
+    parsed = find_judgment_json(eval_response or eval_result.stdout)
+    if parsed:
+        status = str(parsed.get("status", "blocked")).strip().lower()
+        case_result.update({
+            "status": status if status in {"pass", "fail", "blocked"} else "blocked",
+            "assertions": parsed.get("assertions", []),
+            "notes": parsed.get("notes", []),
+            "blocked_reason": None,
+        })
+    else:
+        print("Judgment JSON parse error: no valid JSON object found in evaluator output")
 
     (run_dir / "case-results" / f"{cid}.json").write_text(
         json.dumps(case_result, indent=2) + "\n")
