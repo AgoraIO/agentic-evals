@@ -18,6 +18,7 @@ Architecture:
 """
 import json, subprocess, os, datetime, re, sys
 from pathlib import Path
+from json import JSONDecoder
 
 sys.stdout.reconfigure(line_buffering=True)
 print("=== Hermes evaluator+subagent eval starting ===", flush=True)
@@ -155,19 +156,29 @@ def build_evaluator_prompt(case, attempt_ws, assertions_text, cid, subagent_cmd)
 
 
 def parse_judgment(text):
-    m = re.search(r'\{[\s\S]*\}', text)
-    if m:
+    cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text or "").strip()
+    if not cleaned:
+        return None
+
+    fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
+    for block in reversed(fence_matches):
         try:
-            return json.loads(m.group())
+            parsed = json.loads(block)
+            if isinstance(parsed, dict) and ("status" in parsed or "assertions" in parsed):
+                return parsed
         except json.JSONDecodeError:
             pass
-    for line in text.split("\n"):
-        line = line.strip()
-        if line.startswith("{") and "case_id" in line:
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                pass
+
+    decoder = JSONDecoder()
+    for i, ch in enumerate(cleaned):
+        if ch != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned[i:])
+            if isinstance(parsed, dict) and ("status" in parsed or "assertions" in parsed):
+                return parsed
+        except json.JSONDecodeError:
+            continue
     return None
 
 
@@ -232,8 +243,9 @@ for case in cases:
 
     parsed = parse_judgment(stdout)
     if parsed:
+        status = str(parsed.get("status", "blocked")).strip().lower()
         case_result.update({
-            "status": parsed.get("status", "blocked"),
+            "status": status if status in {"pass", "fail", "blocked"} else "blocked",
             "assertions": parsed.get("assertions", []),
             "notes": parsed.get("notes", []),
             "blocked_reason": None,
