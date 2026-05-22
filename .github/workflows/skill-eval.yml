@@ -75,6 +75,7 @@ jobs:
           '
 
   evaluate:
+    if: github.event_name != 'pull_request'
     needs: validate
     runs-on: macos-latest
     timeout-minutes: 90
