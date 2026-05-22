@@ -19,11 +19,40 @@ repo_root = Path.cwd()
 def now():
     return datetime.datetime.now(datetime.timezone.utc)
 
-def run_gemini(prompt, timeout=600):
+
+def trust_gemini_workspace(workspace: Path):
+    commands = [
+        ["gemini", "trust", "add", str(workspace)],
+        ["gemini", "trust", "add", "--path", str(workspace)],
+        ["gemini", "trust", "add", workspace.name],
+    ]
+    for command in commands:
+        try:
+            proc = subprocess.run(
+                command, capture_output=True, text=True, timeout=30
+            )
+            if proc.returncode == 0:
+                return
+        except FileNotFoundError:
+            print("gemini binary not found while setting trust; skipping trust step")
+            return
+        except Exception as exc:
+            print(f"Unable to run trust command {command}: {exc}")
+            return
+
+
+def run_gemini(prompt, attempt_ws, timeout=600):
+    trust_gemini_workspace(Path(attempt_ws))
     cmd = ["gemini", "--yolo", "--prompt", prompt, "--output-format", "json"]
     if model_flag:
         cmd.extend(["--model", model_flag])
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(attempt_ws),
+    )
 
 
 def strip_ansi(text):
@@ -91,13 +120,16 @@ for case in cases:
         f"- Give the exact answer you would send to the user."
     )
 
-    task_result = run_gemini(task_prompt)
+    task_result = run_gemini(task_prompt, attempt_ws)
     t1_end = now()
     t1_dur = (t1_end - t1_start).total_seconds()
     print(f"Phase 1 completed in {t1_dur:.0f}s (exit={task_result.returncode})")
 
     if task_result.stderr:
-        print(f"Phase 1 stderr (first 300): {task_result.stderr[:300]}")
+        if task_result.returncode == 55:
+            print(f"Phase 1 stderr (full): {task_result.stderr}")
+        else:
+            print(f"Phase 1 stderr (first 300): {task_result.stderr[:300]}")
 
     # Parse task output
     art_dir = run_dir / "case-artifacts" / cid
@@ -146,13 +178,16 @@ for case in cases:
         '"notes": ["..."]}'
     )
 
-    eval_result = run_gemini(eval_prompt, timeout=300)
+    eval_result = run_gemini(eval_prompt, attempt_ws, timeout=300)
     t2_end = now()
     t2_dur = (t2_end - t2_start).total_seconds()
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_result.returncode})")
 
     if eval_result.stderr:
-        print(f"Phase 2 stderr (first 300): {eval_result.stderr[:300]}")
+        if eval_result.returncode == 55:
+            print(f"Phase 2 stderr (full): {eval_result.stderr}")
+        else:
+            print(f"Phase 2 stderr (first 300): {eval_result.stderr[:300]}")
 
     (art_dir / "evaluator-raw.json").write_text(eval_result.stdout)
 
