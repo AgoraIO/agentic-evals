@@ -61,16 +61,28 @@ def fallback_workspace(
     return str(attempt_ws)
 
 
+# Next.js quickstart env keys (see agora skill references/cli/env.md)
+NEXTJS_APP_ID_KEY = "NEXT_PUBLIC_AGORA_APP_ID"
+NEXTJS_APP_CERT_KEY = "NEXT_AGORA_APP_CERTIFICATE"
+CI_APP_ID_KEY = "AGORA_APP_ID"
+CI_APP_CERT_KEY = "AGORA_APP_CERTIFICATE"
+
+
 def seed_agora_credentials(attempt_ws: str | Path) -> Path | None:
     """Write literal Agora creds into the case workspace for agent runtimes."""
-    app_id = os.environ.get("AGORA_APP_ID", "")
-    app_cert = os.environ.get("AGORA_APP_CERTIFICATE", "")
+    app_id = os.environ.get(CI_APP_ID_KEY, "")
+    app_cert = os.environ.get(CI_APP_CERT_KEY, "")
     if not app_id or not app_cert:
-        print("warning: AGORA_APP_ID or AGORA_APP_CERTIFICATE not set; skipping credential seed")
+        print(
+            f"warning: {CI_APP_ID_KEY} or {CI_APP_CERT_KEY} not set; skipping credential seed"
+        )
         return None
     cred_path = Path(attempt_ws) / ".agora-ci-credentials.env"
     cred_path.write_text(
-        f"AGORA_APP_ID={app_id}\nAGORA_APP_CERTIFICATE={app_cert}\n"
+        f"{CI_APP_ID_KEY}={app_id}\n"
+        f"{CI_APP_CERT_KEY}={app_cert}\n"
+        f"{NEXTJS_APP_ID_KEY}={app_id}\n"
+        f"{NEXTJS_APP_CERT_KEY}={app_cert}\n"
     )
     cred_path.chmod(0o600)
     return cred_path
@@ -80,14 +92,20 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
     """Common E2E task requirements for ConvoAI quickstart cases."""
     cred_file = cred_path or Path(attempt_ws) / ".agora-ci-credentials.env"
     return (
-        f"- Read Agora credentials from {cred_file} and use the literal values when "
-        f"writing .env or .env.local files — do NOT write shell variable syntax like "
-        f"${{AGORA_APP_ID}} into files.\n"
+        f"- Read Agora credentials from {cred_file}. CI provides {CI_APP_ID_KEY} and "
+        f"{CI_APP_CERT_KEY}; the official Next.js quickstart expects different keys in "
+        f"`.env.local`: {NEXTJS_APP_ID_KEY} and {NEXTJS_APP_CERT_KEY} (same literal values).\n"
+        f"- When writing the Next.js quickstart `.env.local`, use {NEXTJS_APP_ID_KEY} and "
+        f"{NEXTJS_APP_CERT_KEY} with resolved literal values from the credentials file — "
+        f"do NOT copy {CI_APP_ID_KEY}/{CI_APP_CERT_KEY} key names into `.env.local`, and "
+        f"do NOT write shell variable syntax like ${{{CI_APP_ID_KEY}}} into files.\n"
         f"- If git clone over HTTPS fails, use tarball download instead: "
         f"curl -L https://github.com/OWNER/REPO/archive/refs/heads/main.tar.gz | tar xz\n"
         f"- When starting a dev server (e.g. npm run dev, pnpm dev), you MUST launch it as a "
         f"background process (e.g. `nohup pnpm dev > /dev/null 2>&1 &`) so it keeps running "
         f"after you finish.\n"
+        f"- If `pnpm install` exits with only `[ERR_PNPM_IGNORED_BUILDS]`, treat install as "
+        f"complete and continue to `pnpm dev`.\n"
         f"- After starting the server, verify it is listening (e.g. curl -I http://localhost:3000) "
         f"before reporting success.\n"
     )
