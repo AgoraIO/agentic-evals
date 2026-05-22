@@ -2,6 +2,8 @@
 
 `agentic-evals` is a target-driven evaluation repo for testing one skill at a time.
 
+Current release version: `0.1.0` (from the root `VERSION` file).
+
 This repo defines:
 
 - the evaluator contract in `AGENT.md`
@@ -45,6 +47,17 @@ agentic-evals/
 - `AGENT.md`: canonical evaluator-facing repo contract.
 - `docs/session-evidence.md`: canonical contract for dual-mode session evidence and child-session location.
 - `skill-eval/SKILL.md`: operational instructions for the `skill-eval` evaluator skill, not the source of truth for repo assertions or statuses.
+- `VERSION`: canonical project release version in plain SemVer format.
+
+## Versioning
+
+This repo uses a single root `VERSION` file as the source of truth for release versioning.
+
+Release bump workflow:
+
+1. Update `VERSION` with the next SemVer value.
+2. Reference that version in release branch name, PR title, and release notes.
+3. Tag the merge commit in `main` with the same version (for example `v0.1.0`).
 
 ## How To Read This Repo
 
