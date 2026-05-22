@@ -3,7 +3,6 @@ entry_skill: ".agents/skills/agora/SKILL.md"
 
 roots:
   - ".agents/skills/agora/references"
-  - ".agents/skills/agora/intake"
 
 default_suites:
   - "bootstrap"

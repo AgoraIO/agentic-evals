@@ -4,6 +4,13 @@ import json, subprocess, os, datetime, yaml, re, sys
 from pathlib import Path
 from json import JSONDecoder
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from eval_runtime_helpers import (
+    create_case_workspace,
+    e2e_task_requirements,
+    seed_agora_credentials,
+)
+
 run_dir = Path(os.environ["RUN_DIR"])
 cases = json.loads(Path("/tmp/gemini-eval-cases.json").read_text())
 model_flag = os.environ.get("GEMINI_MODEL", "")
@@ -58,11 +65,10 @@ for case in cases:
     # Create workspace
     ws = Path(f"/tmp/gemini-eval-{cid}")
     ws.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["bash", ".agents/skills/skills-evaluation/scripts/create_case_workspace.sh",
-         str(repo_root), str(ws), cid, "--target", os.environ.get("TARGET_ID", "agora")],
-        capture_output=True, text=True)
-    attempt_ws = result.stdout.strip() or str(ws)
+    attempt_ws, _ = create_case_workspace(
+        repo_root, ws, cid, os.environ.get("TARGET_ID", "agora")
+    )
+    cred_path = seed_agora_credentials(attempt_ws)
     print(f"Workspace: {attempt_ws}")
 
     # --- Phase 1: Task Agent ---
@@ -71,12 +77,17 @@ for case in cases:
 
     task_prompt = (
         f"You are working in workspace: {attempt_ws}\n\n"
+        f"IMPORTANT: Before starting, read the skill documentation files in your workspace:\n"
+        f"  1. First read: {attempt_ws}/.agents/skills/agora/SKILL.md\n"
+        f"  2. Then follow its routing instructions to find the right product reference.\n"
+        f"These files contain critical guidance for completing the task correctly.\n\n"
         f"Task: answer this user request naturally, using the workspace as needed:\n"
         f'"{case["user_prompt"]}"\n\n'
         f"Requirements:\n"
         f"- Treat {attempt_ws} as your only workspace.\n"
         f"- Keep all file reads, writes, and shell commands inside it.\n"
         f"- Use the skill docs in .agents/skills/ if relevant.\n"
+        f"{e2e_task_requirements(attempt_ws, cred_path)}"
         f"- Give the exact answer you would send to the user."
     )
 

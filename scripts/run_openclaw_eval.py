@@ -4,6 +4,13 @@ import json, subprocess, os, datetime, re, sys, time
 from pathlib import Path
 from json import JSONDecoder
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from eval_runtime_helpers import (
+    create_case_workspace,
+    e2e_task_requirements,
+    seed_agora_credentials,
+)
+
 # Force unbuffered output so prints appear in CI logs
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -184,34 +191,14 @@ for case in cases:
     print(f"{'='*60}")
 
     # Create workspace
-    # create_case_workspace.sh expects source_workspace to be PARENT of agentic-evals/
     ws = Path(f"/tmp/openclaw-eval-{cid}")
     ws.mkdir(parents=True, exist_ok=True)
-    source_ws = repo_root.parent  # parent dir that contains agentic-evals/
     print(f"repo_root: {repo_root}")
-    print(f"source_ws: {source_ws}")
-    print(f"source_ws/agentic-evals exists: {(source_ws / 'agentic-evals').exists()}")
-    print(f"repo_root/.agents/skills/agora/SKILL.md exists: {(repo_root / '.agents/skills/agora/SKILL.md').exists()}")
-    print(f"repo_root/.agents/skills/agora/references/conversational-ai/quickstarts.md exists: {(repo_root / '.agents/skills/agora/references/conversational-ai/quickstarts.md').exists()}")
-    result = subprocess.run(
-        ["bash", ".agents/skills/skills-evaluation/scripts/create_case_workspace.sh",
-         str(source_ws), str(ws), cid, "--target", os.environ.get("TARGET_ID", "agora")],
-        capture_output=True, text=True)
-    attempt_ws = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else str(ws)
-    if result.returncode != 0:
-        print(f"Workspace script failed (exit={result.returncode})")
-        print(f"  stdout: {result.stdout[:500]}")
-        print(f"  stderr: {result.stderr[:500]}")
-        # Fallback: manually create workspace with skill files
-        attempt_ws = str(ws / cid / "attempt-01")
-        os.makedirs(attempt_ws, exist_ok=True)
-        src_agents = str(repo_root / ".agents")
-        dst_agents = os.path.join(attempt_ws, ".agents")
-        subprocess.run(["cp", "-rL", src_agents, dst_agents], capture_output=True)
-        copied = subprocess.run(["find", dst_agents, "-type", "f"], capture_output=True, text=True)
-        print(f"Fallback: copied {copied.stdout.count(chr(10))} files to {dst_agents}")
-    else:
-        # Verify workspace has skill files
+    attempt_ws, script_ok = create_case_workspace(
+        repo_root, ws, cid, os.environ.get("TARGET_ID", "agora")
+    )
+    cred_path = seed_agora_credentials(attempt_ws)
+    if script_ok:
         qs = Path(attempt_ws) / ".agents/skills/agora/references/conversational-ai/quickstarts.md"
         print(f"quickstarts.md in workspace: {qs.exists()}")
     print(f"Workspace: {attempt_ws}")
@@ -245,8 +232,7 @@ for case in cases:
         f"Requirements:\n"
         f"- Treat {attempt_ws} as your only workspace.\n"
         f"- Keep all file reads, writes, and shell commands inside it.\n"
-        f"- The environment variables AGORA_APP_ID and AGORA_APP_CERTIFICATE are set and available via $AGORA_APP_ID and $AGORA_APP_CERTIFICATE in shell commands.\n"
-        f"- If git clone over HTTPS fails, use tarball download instead: curl -L https://github.com/OWNER/REPO/archive/refs/heads/main.tar.gz | tar xz\n"
+        f"{e2e_task_requirements(attempt_ws, cred_path)}"
         f"- Give the exact answer you would send to the user."
     )
 

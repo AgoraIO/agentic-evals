@@ -3,6 +3,14 @@
 import json, subprocess, os, datetime, re, sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from eval_runtime_helpers import (
+    create_case_workspace,
+    e2e_task_requirements,
+    hermes_env,
+    seed_agora_credentials,
+)
+
 sys.stdout.reconfigure(line_buffering=True)
 
 print("=== Hermes eval script starting ===", flush=True)
@@ -42,7 +50,7 @@ def run_hermes(prompt, timeout=600, label="agent", cwd=None):
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            env={**os.environ}, cwd=cwd
+            env=hermes_env(), cwd=cwd
         )
         return result.stdout, result.returncode, result.stderr
     except subprocess.TimeoutExpired:
@@ -100,24 +108,10 @@ for case in cases:
     # Create workspace
     ws = Path(f"/tmp/hermes-eval-{cid}")
     ws.mkdir(parents=True, exist_ok=True)
-    source_ws = repo_root
-    result = subprocess.run(
-        ["bash", ".agents/skills/skills-evaluation/scripts/create_case_workspace.sh",
-         str(source_ws), str(ws), cid, "--target", os.environ.get("TARGET_ID", "agora")],
-        capture_output=True, text=True)
-    attempt_ws = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else str(ws)
-    if result.returncode != 0:
-        print(f"Workspace script failed (exit={result.returncode})")
-        print(f"  stdout: {result.stdout[:500]}")
-        print(f"  stderr: {result.stderr[:500]}")
-        # Fallback: manually create workspace with skill files
-        attempt_ws = str(ws / cid / "attempt-01")
-        os.makedirs(attempt_ws, exist_ok=True)
-        src_agents = str(repo_root / ".agents")
-        dst_agents = os.path.join(attempt_ws, ".agents")
-        subprocess.run(["cp", "-rL", src_agents, dst_agents], capture_output=True)
-        copied = subprocess.run(["find", dst_agents, "-type", "f"], capture_output=True, text=True)
-        print(f"Fallback: copied {copied.stdout.count(chr(10))} files to {dst_agents}")
+    attempt_ws, _ = create_case_workspace(
+        repo_root, ws, cid, os.environ.get("TARGET_ID", "agora")
+    )
+    cred_path = seed_agora_credentials(attempt_ws)
     print(f"Workspace: {attempt_ws}")
 
     # --- Phase 1: Task Agent (Hermes) ---
@@ -135,13 +129,7 @@ for case in cases:
         f"Requirements:\n"
         f"- Treat {attempt_ws} as your only workspace.\n"
         f"- Keep all file reads, writes, and shell commands inside it.\n"
-        f"- The environment variables AGORA_APP_ID and AGORA_APP_CERTIFICATE are set and available.\n"
-        f"  Use their literal values (echo $AGORA_APP_ID) when writing config files — do NOT write shell variable syntax like ${{AGORA_APP_ID}} into files.\n"
-        f"- If git clone over HTTPS fails, use tarball download instead: "
-        f"curl -L https://github.com/OWNER/REPO/archive/refs/heads/main.tar.gz | tar xz\n"
-        f"- When starting a dev server (e.g. npm run dev, pnpm dev), you MUST launch it as a background process "
-        f"(e.g. `nohup pnpm dev > /dev/null 2>&1 &` or use the process tool) so it keeps running after you finish.\n"
-        f"- After starting the server, verify it is listening (e.g. curl -I http://localhost:3000) before reporting success.\n"
+        f"{e2e_task_requirements(attempt_ws, cred_path)}"
         f"- Give the exact answer you would send to the user."
     )
 

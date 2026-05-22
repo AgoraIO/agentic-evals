@@ -25,7 +25,21 @@ mkdir -p "$case_workspace_root"
 
 source_workspace=$(cd "$source_workspace" && pwd)
 case_workspace_root=$(cd "$case_workspace_root" && pwd)
-eval_repo_root="$source_workspace/agentic-evals"
+
+resolve_eval_repo_root() {
+  local target="$1"
+  if [[ -f "$source_workspace/targets/$target/target.yaml" ]]; then
+    printf '%s\n' "$source_workspace"
+    return 0
+  fi
+  if [[ -f "$source_workspace/agentic-evals/targets/$target/target.yaml" ]]; then
+    printf '%s\n' "$source_workspace/agentic-evals"
+    return 0
+  fi
+  return 1
+}
+
+eval_repo_root=""
 safe_case_id=${case_id//\//-}
 case_dir="$case_workspace_root/$safe_case_id"
 mkdir -p "$case_dir"
@@ -53,12 +67,12 @@ if [[ $# -gt 0 && "$1" == "--target" ]]; then
 
 fi
 
-target_yaml="$eval_repo_root/targets/$target_id/target.yaml"
-
-if [[ ! -f "$target_yaml" ]]; then
-  echo "target config does not exist: agentic-evals/targets/$target_id/target.yaml" >&2
+if ! eval_repo_root=$(resolve_eval_repo_root "$target_id"); then
+  echo "target config does not exist: targets/$target_id/target.yaml (checked $source_workspace and $source_workspace/agentic-evals)" >&2
   exit 1
 fi
+
+target_yaml="$eval_repo_root/targets/$target_id/target.yaml"
 
 resolve_existing_relpath_base() {
   local relpath
@@ -124,9 +138,10 @@ validate_include_path() {
   fi
 
   if ! resolve_existing_relpath_base "$relpath" >/dev/null 2>&1; then
-    echo "include path does not exist: $relpath" >&2
-    exit 1
+    return 1
   fi
+
+  return 0
 }
 
 copy_include_path() {
@@ -140,7 +155,10 @@ copy_include_path() {
 include_paths=()
 while IFS= read -r relpath; do
   [[ -n "$relpath" ]] || continue
-  validate_include_path "$relpath"
+  if ! validate_include_path "$relpath"; then
+    echo "warning: skipping missing include path: $relpath" >&2
+    continue
+  fi
   include_paths+=("$relpath")
 done < <(collect_include_paths "$@")
 

@@ -20,6 +20,14 @@ import json, subprocess, os, datetime, re, sys
 from pathlib import Path
 from json import JSONDecoder
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from eval_runtime_helpers import (
+    create_case_workspace,
+    e2e_task_requirements,
+    hermes_env,
+    seed_agora_credentials,
+)
+
 sys.stdout.reconfigure(line_buffering=True)
 print("=== Hermes evaluator+subagent eval starting ===", flush=True)
 
@@ -53,7 +61,7 @@ def run_hermes(prompt, timeout=900, label="evaluator", cwd=None):
     print(f"  [{label}] hermes chat -q (cwd={cwd}, timeout={timeout}s)")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, env={**os.environ}, cwd=cwd)
+                           timeout=timeout, env=hermes_env(), cwd=cwd)
         return r.stdout, r.returncode, r.stderr
     except subprocess.TimeoutExpired:
         print(f"  [{label}] TIMEOUT {timeout}s")
@@ -63,22 +71,14 @@ def run_hermes(prompt, timeout=900, label="evaluator", cwd=None):
 def setup_workspace(cid):
     ws = Path(f"/tmp/hermes-eval-{cid}")
     ws.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(
-        ["bash", ".agents/skills/skills-evaluation/scripts/create_case_workspace.sh",
-         str(repo_root), str(ws), cid, "--target", os.environ.get("TARGET_ID", "agora")],
-        capture_output=True, text=True)
-    attempt_ws = r.stdout.strip().split("\n")[-1] if r.stdout.strip() else str(ws)
-    if r.returncode != 0:
-        print(f"Workspace script failed (exit={r.returncode})")
-        attempt_ws = str(ws / cid / "attempt-01")
-        os.makedirs(attempt_ws, exist_ok=True)
-        src = str(repo_root / ".agents")
-        dst = os.path.join(attempt_ws, ".agents")
-        subprocess.run(["cp", "-rL", src, dst], capture_output=True)
+    attempt_ws, _ = create_case_workspace(
+        repo_root, ws, cid, os.environ.get("TARGET_ID", "agora")
+    )
+    seed_agora_credentials(attempt_ws)
     return attempt_ws
 
 
-def build_subagent_task_prompt(case, attempt_ws):
+def build_subagent_task_prompt(case, attempt_ws, cred_path=None):
     """The prompt that the sub-agent receives. No assertions, no eval context."""
     return (
         f"You are working in workspace: {attempt_ws}\n\n"
@@ -91,14 +91,7 @@ def build_subagent_task_prompt(case, attempt_ws):
         f"Requirements:\n"
         f"- Treat {attempt_ws} as your only workspace.\n"
         f"- Keep all file reads, writes, and shell commands inside it.\n"
-        f"- The environment variables AGORA_APP_ID and AGORA_APP_CERTIFICATE are set and available.\n"
-        f"  Use their literal values (echo $AGORA_APP_ID) when writing config files — do NOT write "
-        f"shell variable syntax like ${{AGORA_APP_ID}} into files.\n"
-        f"- If git clone over HTTPS fails, use tarball download instead: "
-        f"curl -L https://github.com/OWNER/REPO/archive/refs/heads/main.tar.gz | tar xz\n"
-        f"- When starting a dev server (e.g. npm run dev, pnpm dev), you MUST launch it as a background process "
-        f"(e.g. `nohup pnpm dev > /dev/null 2>&1 &` or use the process tool) so it keeps running after you finish.\n"
-        f"- After starting the server, verify it is listening (e.g. curl -I http://localhost:3000) before reporting success.\n"
+        f"{e2e_task_requirements(attempt_ws, cred_path)}"
         f"- IMPORTANT: After the server responds to HEAD requests, also do a full GET request to warm up the page:\n"
         f"  curl -s -o /dev/null -w '%{{http_code}}' --max-time 120 http://localhost:3000\n"
         f"  This triggers Next.js page compilation. Wait for it to complete before reporting success.\n"
@@ -188,6 +181,7 @@ for case in cases:
     print(f"\n{'='*60}\nCase: {cid}\n{'='*60}")
 
     attempt_ws = setup_workspace(cid)
+    cred_path = Path(attempt_ws) / ".agora-ci-credentials.env"
     print(f"Workspace: {attempt_ws}")
 
     case_data = yaml.safe_load(open(case["path"]))
@@ -195,7 +189,7 @@ for case in cases:
         case_data.get("assert", {}).get("required", []), indent=2)
 
     # Build the sub-agent command that the evaluator will execute via shell
-    task_prompt = build_subagent_task_prompt(case, attempt_ws)
+    task_prompt = build_subagent_task_prompt(case, attempt_ws, cred_path)
     # Escape single quotes in the prompt for shell safety
     escaped_prompt = task_prompt.replace("'", "'\\''")
     subagent_cmd = f"hermes chat --yolo --quiet -q '{escaped_prompt}'"
