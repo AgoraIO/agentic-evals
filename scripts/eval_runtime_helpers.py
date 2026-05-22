@@ -106,6 +106,8 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         f"after you finish.\n"
         f"- If `pnpm install` exits with only `[ERR_PNPM_IGNORED_BUILDS]`, treat install as "
         f"complete and continue to `pnpm dev`.\n"
+        f"- This is an automated CI evaluation. Do not ask for confirmation or permission.\n"
+        f"  Install missing tools (pnpm, corepack, etc.) and continue automatically.\n"
         f"- After starting the server, verify it is listening (e.g. curl -I http://localhost:3000) "
         f"before reporting success.\n"
     )
@@ -116,4 +118,5 @@ def hermes_env() -> dict[str, str]:
     env = {**os.environ}
     home_local = Path.home() / ".local" / "bin"
     env["PATH"] = f"{home_local}{os.pathsep}{env.get('PATH', '')}"
+    env.setdefault("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
     return env
