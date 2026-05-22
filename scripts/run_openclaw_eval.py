@@ -39,7 +39,7 @@ print(f"repo_root: {repo_root}", flush=True)
 def now():
     return datetime.datetime.now(datetime.timezone.utc)
 
-def run_openclaw(prompt, timeout=600, label="agent"):
+def run_openclaw(prompt, timeout=600, label="agent", cwd=None):
     """Run a prompt via acpx openclaw with persistent session for full tool access."""
     print(f"  [{label}] Creating new session and sending prompt...")
     
@@ -54,7 +54,7 @@ def run_openclaw(prompt, timeout=600, label="agent"):
     try:
         result = subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=None,
-            text=True, timeout=timeout,
+            text=True, timeout=timeout, cwd=cwd,
             env={**os.environ}
         )
         return result.stdout, result.returncode
@@ -236,7 +236,7 @@ for case in cases:
         f"- Give the exact answer you would send to the user."
     )
 
-    task_raw, task_exit = run_openclaw(task_prompt, timeout=600, label="task")
+    task_raw, task_exit = run_openclaw(task_prompt, timeout=600, label="task", cwd=attempt_ws)
 
     # Retry up to 2 more times if the agent times out or produces no output
     MAX_RETRIES = 3
@@ -258,7 +258,9 @@ for case in cases:
             capture_output=True, text=True, timeout=30
         )
         time.sleep(2)
-        task_raw, task_exit = run_openclaw(task_prompt, timeout=600, label=f"task-retry{attempt}")
+        task_raw, task_exit = run_openclaw(
+            task_prompt, timeout=600, label=f"task-retry{attempt}", cwd=attempt_ws
+        )
 
     t1_end = now()
     t1_dur = (t1_end - t1_start).total_seconds()
@@ -302,6 +304,9 @@ for case in cases:
         f"- Search for .env.local files recursively: find {attempt_ws} -name '.env.local'\n"
         f"- Check if the env file contains non-empty NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE values\n"
         f"- Check if a dev server process is running: ss -ltnp | grep 3000 or curl http://localhost:3000\n"
+        f"- Confirm clone provenance: evidence shows a clone from the official repo URL "
+        "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs` (or tarball equivalent), and not "
+        "`AgoraIO-Community/conversational-ai-nextjs-client`.\n"
         f"- Do NOT assume a fixed directory name like 'agent-quickstart-nextjs' — the agent may have cloned into a different directory name.\n"
         f"- Run these checks yourself before judging.\n\n"
         f"Check these assertions and tell me pass or fail for each:\n{assertions_text}\n\n"

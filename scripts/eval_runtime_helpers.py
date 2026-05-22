@@ -92,6 +92,9 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
     """Common E2E task requirements for ConvoAI quickstart cases."""
     cred_file = cred_path or Path(attempt_ws) / ".agora-ci-credentials.env"
     return (
+        "- Path A is mandatory: use the official Next.js quickstart repository "
+        "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs` (or `agent-quickstart-nextjs` clone target). "
+        "Do NOT clone or scaffold from `AgoraIO-Community/conversational-ai-nextjs-client` or other community forks.\n"
         f"- Read Agora credentials from {cred_file}. CI provides {CI_APP_ID_KEY} and "
         f"{CI_APP_CERT_KEY}; the official Next.js quickstart expects different keys in "
         f"`.env.local`: {NEXTJS_APP_ID_KEY} and {NEXTJS_APP_CERT_KEY} (same literal values).\n"
@@ -99,6 +102,9 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         f"{NEXTJS_APP_CERT_KEY} with resolved literal values from the credentials file — "
         f"do NOT copy {CI_APP_ID_KEY}/{CI_APP_CERT_KEY} key names into `.env.local`, and "
         f"do NOT write shell variable syntax like ${{{CI_APP_ID_KEY}}} into files.\n"
+        "- Env mapping for this flow:\n"
+        f"  - CI `{CI_APP_ID_KEY}` -> Next.js `{NEXTJS_APP_ID_KEY}`\n"
+        f"  - CI `{CI_APP_CERT_KEY}` -> Next.js `{NEXTJS_APP_CERT_KEY}` (literal value)\n"
         f"- If git clone over HTTPS fails, use tarball download instead: "
         f"curl -L https://github.com/OWNER/REPO/archive/refs/heads/main.tar.gz | tar xz\n"
         f"- When starting a dev server (e.g. npm run dev, pnpm dev), you MUST launch it as a "
@@ -110,6 +116,10 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         f"  Install missing tools (pnpm, corepack, etc.) and continue automatically.\n"
         f"- After starting the server, verify it is listening (e.g. curl -I http://localhost:3000) "
         f"before reporting success.\n"
+        "- For this E2E case, 200 at the page root is only partial success. The evaluator "
+        "requires proof of end-to-end conversation readiness (invite/token flow is wired and runnable). "
+        "A passing report should mention observed successful route into the quickstart demo flow, not only that "
+        "http://localhost:3000 returns 200.\n"
     )
 
 
