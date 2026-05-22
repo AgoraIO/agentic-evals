@@ -75,7 +75,6 @@ jobs:
           '
 
   evaluate:
-    if: github.event_name != 'pull_request'
     needs: validate
     runs-on: macos-latest
     timeout-minutes: 90
@@ -98,17 +97,21 @@ jobs:
           npm install -g agent-browser
 
       - name: Sync external skill repo
+        id: skill_sync
         env:
           SKILL_REPO: ${{ github.event.inputs.skill_repo || 'AgoraIO/skills' }}
           SKILL_REF: ${{ github.event.inputs.skill_repo_ref || 'main' }}
         run: |
           if [ -d .agents/skills/agora ] && [ -f .agents/skills/agora/SKILL.md ]; then
             echo "Agora skill already present, skipping sync"
+            echo "skill_sha=bundled" >> "$GITHUB_OUTPUT"
+            echo "skill_ref=bundled" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Cloning skill repo: ${SKILL_REPO} @ ${SKILL_REF}"
           git clone "https://github.com/${SKILL_REPO}.git" /tmp/skill-repo
-          git -C /tmp/skill-repo checkout "${SKILL_REF}"
+          git -C /tmp/skill-repo fetch --depth 1 origin "${SKILL_REF}"
+          git -C /tmp/skill-repo checkout FETCH_HEAD
           rm -rf .agents/skills/agora
           mkdir -p .agents/skills/agora
           if [ -d /tmp/skill-repo/skills/agora ]; then
@@ -117,7 +120,28 @@ jobs:
             echo "::error::skills/agora/ not found in skill repo ${SKILL_REPO}"
             exit 1
           fi
-          echo "Skill synced from ${SKILL_REPO}@${SKILL_REF}"
+          SKILL_SHA=$(git -C /tmp/skill-repo rev-parse HEAD)
+          echo "Skill synced from ${SKILL_REPO}@${SKILL_REF} (${SKILL_SHA})"
+          echo "skill_sha=${SKILL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "skill_ref=${SKILL_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Log eval refs
+        run: |
+          EVAL_SHA=$(git rev-parse HEAD)
+          SKILL_SHA="${{ steps.skill_sync.outputs.skill_sha }}"
+          SKILL_REF="${{ steps.skill_sync.outputs.skill_ref }}"
+          echo "Eval SHA:  ${EVAL_SHA}"
+          echo "Skill ref: ${SKILL_REF}"
+          echo "Skill SHA: ${SKILL_SHA}"
+          {
+            echo "## Eval setup"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Eval SHA | \`${EVAL_SHA}\` |"
+            echo "| Skill ref | \`${SKILL_REF}\` |"
+            echo "| Skill SHA | \`${SKILL_SHA}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write credentials file
         env:
