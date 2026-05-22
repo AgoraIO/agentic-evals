@@ -92,9 +92,9 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
     """Common E2E task requirements for ConvoAI quickstart cases."""
     cred_file = cred_path or Path(attempt_ws) / ".agora-ci-credentials.env"
     return (
-        "- Path A is mandatory: use the official Next.js quickstart repository "
+        "- Path A (web quickstart) is mandatory for this E2E case: use the official Next.js quickstart repository "
         "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs` (or `agent-quickstart-nextjs` clone target). "
-        "Do NOT clone or scaffold from `AgoraIO-Community/conversational-ai-nextjs-client` or other community forks.\n"
+        "Do not clone any non-official repository variant for this flow.\n"
         f"- Read Agora credentials from {cred_file}. CI provides {CI_APP_ID_KEY} and "
         f"{CI_APP_CERT_KEY}; the official Next.js quickstart expects different keys in "
         f"`.env.local`: {NEXTJS_APP_ID_KEY} and {NEXTJS_APP_CERT_KEY} (same literal values).\n"
