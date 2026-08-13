@@ -125,16 +125,13 @@ for case in cases:
     t1_dur = (t1_end - t1_start).total_seconds()
     print(f"Phase 1 completed in {t1_dur:.0f}s (exit={task_result.returncode})")
 
-    if task_result.stderr:
-        if task_result.returncode == 55:
-            print(f"Phase 1 stderr (full): {task_result.stderr}")
-        else:
-            print(f"Phase 1 stderr (first 300): {task_result.stderr[:300]}")
-
     # Parse task output
     art_dir = run_dir / "case-artifacts" / cid
     art_dir.mkdir(parents=True, exist_ok=True)
     (art_dir / "task-agent-raw.json").write_text(task_result.stdout)
+    if task_result.stderr:
+        print(f"Phase 1 stderr (full): {task_result.stderr}")
+        (art_dir / "task-agent-stderr.txt").write_text(task_result.stderr)
 
     task_response = ""
     task_tools = {}
@@ -183,13 +180,10 @@ for case in cases:
     t2_dur = (t2_end - t2_start).total_seconds()
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_result.returncode})")
 
-    if eval_result.stderr:
-        if eval_result.returncode == 55:
-            print(f"Phase 2 stderr (full): {eval_result.stderr}")
-        else:
-            print(f"Phase 2 stderr (first 300): {eval_result.stderr[:300]}")
-
     (art_dir / "evaluator-raw.json").write_text(eval_result.stdout)
+    if eval_result.stderr:
+        print(f"Phase 2 stderr (full): {eval_result.stderr}")
+        (art_dir / "evaluator-stderr.txt").write_text(eval_result.stderr)
 
     # Parse evaluator response
     eval_response = ""
@@ -237,7 +231,9 @@ for case in cases:
     # Evidence bundle
     evidence = {
         "task_agent_output": task_result.stdout[:50000],
+        "task_agent_stderr": task_result.stderr[:50000],
         "evaluator_output": eval_result.stdout[:50000],
+        "evaluator_stderr": eval_result.stderr[:50000],
         "workspace_files": ws_files,
     }
     (art_dir / "accepted-session.json").write_text(

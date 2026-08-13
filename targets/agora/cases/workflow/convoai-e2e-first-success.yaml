@@ -51,6 +51,7 @@ assert:
       pass_criteria:
         - "Session evidence shows a dev server start command (pnpm dev, npm run dev, or equivalent)."
         - "The final answer includes a local URL (e.g. http://localhost:3000), OR a process is listening on port 3000 at verification time."
+        - "Runner diagnostics include the dependency-install and dev-server logs when the task agent created them."
       fail_signals:
         - "No dev server start command observed."
         - "Final answer does not mention a running URL and no process is listening on port 3000."
@@ -61,14 +62,20 @@ assert:
 
     - description: "The demo page loads successfully in a browser."
       pass_criteria:
+        - "A real GET request to the reported URL returns a successful status with a non-empty response body; HEAD-only success or a listening socket is insufficient."
         - "The evaluator opens the reported URL and the page loads without errors."
         - "If the flow exposes a Start Conversation/Invite action, successful navigation into that action is observed (partial page load alone is not enough for a full-success claim)."
       fail_signals:
+        - "GET / times out, returns an error, or returns an empty response body."
+        - "Required dependency build scripts are explicitly disabled to bypass installation."
         - "The page fails to load or returns an HTTP error."
         - "The browser console shows critical JavaScript errors."
         - "The page is reachable but the evaluator does not reach the conversation start/invite flow."
       evidence_scope:
         - "evaluator-verification"
+        - "runtime-diagnostics.json"
+        - "install.log"
+        - "dev-server.log"
 
   forbidden: []
 

@@ -10,6 +10,7 @@ from eval_runtime_helpers import (
     e2e_task_requirements,
     seed_agora_credentials,
 )
+from openclaw_acpx import AcpxClient, AcpxCommandError
 
 # Force unbuffered output so prints appear in CI logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -42,22 +43,13 @@ def now():
 def run_openclaw(prompt, timeout=600, label="agent", cwd=None):
     """Run a prompt via acpx openclaw with persistent session for full tool access."""
     print(f"  [{label}] Creating new session and sending prompt...")
-    
-    # Step 1: Ensure a session exists
-    subprocess.run(
-        ["acpx", "--approve-all", "openclaw", "sessions", "ensure"],
-        capture_output=True, text=True, timeout=30
-    )
-    
-    # Step 2: Send prompt to the session (not exec)
-    cmd = ["acpx", "--approve-all", "--format", "json", "openclaw", "prompt", prompt]
+    client = AcpxClient(cwd or Path.cwd())
     try:
-        result = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=None,
-            text=True, timeout=timeout, cwd=cwd,
-            env={**os.environ}
-        )
-        return result.stdout, result.returncode
+        client.ensure_session()
+        return client.prompt(prompt, timeout=timeout)
+    except AcpxCommandError as error:
+        print(f"  [{label}] {error}", file=sys.stderr, flush=True)
+        return json.dumps({"error": str(error)}), error.returncode
     except subprocess.TimeoutExpired:
         print(f"  [{label}] TIMEOUT after {timeout}s")
         return json.dumps({"error": f"TIMEOUT after {timeout}s"}), -1
@@ -205,16 +197,11 @@ for case in cases:
 
     # --- Phase 1: Task Agent ---
     # Reset session for clean state and enable elevated mode
-    subprocess.run(
-        ["acpx", "--approve-all", "openclaw", "sessions", "new"],
-        capture_output=True, text=True, timeout=30
-    )
+    task_client = AcpxClient(attempt_ws)
+    task_client.new_session()
     time.sleep(3)
     # Enable auto-approve for shell commands
-    subprocess.run(
-        ["acpx", "--approve-all", "openclaw", "prompt", "/elevated full"],
-        capture_output=True, text=True, timeout=30
-    )
+    task_client.set_elevated()
     time.sleep(2)
     print("  Elevated mode set to full (auto-approve)", flush=True)
 
@@ -248,15 +235,9 @@ for case in cases:
             break
         print(f"  [task] Attempt {attempt - 1} failed (timeout={is_timeout}, empty={is_empty}). Retrying ({attempt}/{MAX_RETRIES})...", flush=True)
         # Reset session for clean state
-        subprocess.run(
-            ["acpx", "--approve-all", "openclaw", "sessions", "new"],
-            capture_output=True, text=True, timeout=30
-        )
+        task_client.new_session()
         time.sleep(3)
-        subprocess.run(
-            ["acpx", "--approve-all", "openclaw", "prompt", "/elevated full"],
-            capture_output=True, text=True, timeout=30
-        )
+        task_client.set_elevated()
         time.sleep(2)
         task_raw, task_exit = run_openclaw(
             task_prompt, timeout=600, label=f"task-retry{attempt}", cwd=attempt_ws

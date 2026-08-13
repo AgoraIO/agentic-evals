@@ -5,9 +5,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
+    collect_web_runtime_diagnostics,
     create_case_workspace,
     e2e_task_requirements,
     hermes_env,
+    redact_sensitive_text,
     seed_agora_credentials,
 )
 
@@ -140,13 +142,26 @@ for case in cases:
 
     art_dir = run_dir / "case-artifacts" / cid
     art_dir.mkdir(parents=True, exist_ok=True)
-    (art_dir / "task-agent-raw.txt").write_text(task_stdout)
-    if task_stderr:
-        (art_dir / "task-agent-stderr.txt").write_text(task_stderr)
+    safe_task_stdout = redact_sensitive_text(task_stdout)
+    safe_task_stderr = redact_sensitive_text(task_stderr or "")
+    (art_dir / "task-agent-raw.txt").write_text(safe_task_stdout)
+    if safe_task_stderr:
+        (art_dir / "task-agent-stderr.txt").write_text(safe_task_stderr)
 
-    task_response = task_stdout
+    task_response = safe_task_stdout
     print(f"Phase 1 response (first 500):\n{task_response[:500]}")
     (art_dir / "final-answer.txt").write_text(task_response + "\n")
+
+    runtime_diagnostics, runtime_logs = collect_web_runtime_diagnostics(attempt_ws)
+    (art_dir / "runtime-diagnostics.json").write_text(
+        json.dumps(runtime_diagnostics, indent=2) + "\n"
+    )
+    for log_name, log_text in runtime_logs.items():
+        (art_dir / log_name).write_text(log_text)
+    print(
+        "Runtime diagnostics: "
+        + json.dumps(runtime_diagnostics, ensure_ascii=False)
+    )
 
     # Workspace state
     ws_files = subprocess.run(
@@ -167,10 +182,15 @@ for case in cases:
         f"The agent responded:\n{task_response[:1500]}\n\n"
         f"The agent's workspace is at: {attempt_ws}\n"
         f"Files in workspace: {ws_files.count(chr(10))}\n\n"
+        f"Runner-collected runtime diagnostics:\n{json.dumps(runtime_diagnostics, indent=2)}\n\n"
         f"IMPORTANT: Verify by inspecting the workspace directly:\n"
         f"- Check if {attempt_ws}/agent-quickstart-nextjs exists (git clone evidence)\n"
         f"- Check if a .env.local file exists with Agora credentials\n"
-        f"- Check if a dev server process is running (use: lsof -i :3000 or curl http://localhost:3000)\n"
+        f"- Use runtime-diagnostics.json and the saved install/dev logs as primary runtime evidence.\n"
+        f"- For browser assertions, invoke the installed agent-browser CLI through shell commands.\n"
+        f"- Open http://localhost:3000, activate the Start Conversation button, and inspect the resulting page state.\n"
+        f"- Inspect agent-browser network requests for /api/invite-agent; do not infer Invite success from the landing-page GET alone.\n"
+        f"- A listening process or successful HEAD request is not enough: require a successful GET with a non-empty body.\n"
         f"- Run these checks yourself before judging.\n\n"
         f"Check these assertions and tell me pass or fail for each:\n{assertions_text}\n\n"
         f"Write your answer as a JSON object with this structure:\n"
@@ -185,8 +205,9 @@ for case in cases:
     t2_dur = (t2_end - t2_start).total_seconds()
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_exit})")
 
-    (art_dir / "evaluator-raw.txt").write_text(eval_response)
-    print(f"Phase 2 response (first 800):\n{eval_response[:800]}")
+    safe_eval_response = redact_sensitive_text(eval_response)
+    (art_dir / "evaluator-raw.txt").write_text(safe_eval_response)
+    print(f"Phase 2 response (first 800):\n{safe_eval_response[:800]}")
 
     # Parse judgment
     case_result = {
@@ -205,7 +226,7 @@ for case in cases:
         "workspace_root": attempt_ws,
     }
 
-    json_match = re.search(r'\{[\s\S]*\}', eval_response)
+    json_match = re.search(r'\{[\s\S]*\}', safe_eval_response)
     if json_match:
         try:
             parsed = json.loads(json_match.group())
@@ -218,15 +239,18 @@ for case in cases:
         except Exception as e:
             print(f"Judgment parse error: {e}")
 
+    safe_case_result = redact_sensitive_text(json.dumps(case_result, indent=2))
     (run_dir / "case-results" / f"{cid}.json").write_text(
-        json.dumps(case_result, indent=2) + "\n")
+        safe_case_result + "\n"
+    )
 
     # Evidence bundle
     evidence = {
-        "task_agent_output": task_stdout[:50000],
-        "task_agent_stderr": (task_stderr or "")[:10000],
-        "evaluator_output": eval_response[:50000],
+        "task_agent_output": safe_task_stdout[:50000],
+        "task_agent_stderr": safe_task_stderr[:10000],
+        "evaluator_output": safe_eval_response[:50000],
         "workspace_files": ws_files,
+        "runtime_diagnostics": runtime_diagnostics,
     }
     (art_dir / "accepted-session.json").write_text(
         json.dumps(evidence, indent=2, ensure_ascii=False) + "\n")

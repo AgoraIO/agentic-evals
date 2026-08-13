@@ -2,8 +2,13 @@
 """Shared helpers for two-phase eval runtime scripts."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -67,6 +72,149 @@ NEXTJS_APP_CERT_KEY = "NEXT_AGORA_APP_CERTIFICATE"
 CI_APP_ID_KEY = "AGORA_APP_ID"
 CI_APP_CERT_KEY = "AGORA_APP_CERTIFICATE"
 
+SENSITIVE_ENV_KEYS = (
+    CI_APP_ID_KEY,
+    CI_APP_CERT_KEY,
+    NEXTJS_APP_ID_KEY,
+    NEXTJS_APP_CERT_KEY,
+)
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Remove Agora credential values before text is written to run artifacts."""
+    redacted = text
+    assignment_pattern = re.compile(
+        rf"(?m)(\b(?:{'|'.join(SENSITIVE_ENV_KEYS)})\s*=\s*)[^\s\"']+"
+    )
+    redacted = assignment_pattern.sub(r"\1[REDACTED]", redacted)
+    sensitive_values = sorted(
+        {os.environ.get(key, "") for key in SENSITIVE_ENV_KEYS} - {""},
+        key=len,
+        reverse=True,
+    )
+    for value in sensitive_values:
+        redacted = redacted.replace(value, "[REDACTED]")
+    return redacted
+
+
+def probe_http_endpoint(url: str, timeout: int = 10) -> dict[str, object]:
+    """Probe an endpoint without persisting its potentially sensitive response body."""
+    started = time.monotonic()
+    result: dict[str, object] = {
+        "url": url,
+        "status": None,
+        "body_bytes": 0,
+        "error": None,
+    }
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read(1_000_001)
+            result["status"] = response.status
+            result["body_bytes"] = len(body)
+            result["body_truncated"] = len(body) > 1_000_000
+    except urllib.error.HTTPError as error:
+        result["status"] = error.code
+        result["error"] = f"HTTP {error.code}"
+    except Exception as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+    result["duration_ms"] = round((time.monotonic() - started) * 1000)
+    return result
+
+
+def _find_nextjs_app(workspace: Path) -> Path | None:
+    for package_json in workspace.rglob("package.json"):
+        if "node_modules" in package_json.parts:
+            continue
+        try:
+            package = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if package.get("name") == "convoai-quickstart-web-nextjs":
+            return package_json.parent
+    return None
+
+
+def _denied_build_scripts(app_dir: Path) -> tuple[list[str], str | None]:
+    policy_path = app_dir / "pnpm-workspace.yaml"
+    if not policy_path.exists():
+        return [], None
+    try:
+        import yaml
+
+        policy = yaml.safe_load(policy_path.read_text()) or {}
+        allow_builds = policy.get("allowBuilds", {})
+        if not isinstance(allow_builds, dict):
+            return [], "allowBuilds is not a mapping"
+        return sorted(name for name, allowed in allow_builds.items() if allowed is False), None
+    except ModuleNotFoundError:
+        denied = []
+        in_allow_builds = False
+        for line in policy_path.read_text().splitlines():
+            if line.strip() == "allowBuilds:":
+                in_allow_builds = True
+                continue
+            if in_allow_builds and line and not line[0].isspace():
+                break
+            match = re.match(r"^\s+([^:#]+):\s*false\s*$", line)
+            if in_allow_builds and match:
+                denied.append(match.group(1).strip())
+        return sorted(denied), None
+    except Exception as error:
+        return [], f"{type(error).__name__}: {error}"
+
+
+def collect_web_runtime_diagnostics(
+    workspace: str | Path,
+) -> tuple[dict[str, object], dict[str, str]]:
+    """Collect bounded, redacted diagnostics for the Next.js E2E quickstart."""
+    workspace = Path(workspace)
+    app_dir = _find_nextjs_app(workspace)
+    if app_dir is None:
+        return {"app_dir": None, "error": "quickstart app not found"}, {}
+
+    denied_build_scripts, build_policy_error = _denied_build_scripts(app_dir)
+    diagnostics: dict[str, object] = {
+        "app_dir": str(app_dir.relative_to(workspace)),
+        "denied_build_scripts": denied_build_scripts,
+        "build_policy_error": build_policy_error,
+        "probes": [
+            probe_http_endpoint("http://localhost:3000/"),
+            probe_http_endpoint(
+                "http://localhost:3000/api/generate-agora-token"
+            ),
+        ],
+    }
+    home_probe = diagnostics["probes"][0]
+    diagnostics["page_ready"] = (
+        home_probe["error"] is None
+        and isinstance(home_probe["status"], int)
+        and 200 <= home_probe["status"] < 400
+        and home_probe["body_bytes"] > 0
+    )
+
+    try:
+        listener = subprocess.run(
+            ["lsof", "-n", "-P", "-iTCP:3000", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+        )
+        diagnostics["port_3000_listener"] = redact_sensitive_text(
+            (listener.stdout or listener.stderr).strip()
+        )
+        diagnostics["listener_error"] = None
+    except OSError as error:
+        diagnostics["port_3000_listener"] = ""
+        diagnostics["listener_error"] = f"{type(error).__name__}: {error}"
+
+    logs: dict[str, str] = {}
+    for name in ("install.log", "dev-server.log"):
+        log_path = app_dir / ".eval" / name
+        if log_path.exists():
+            logs[name] = redact_sensitive_text(
+                log_path.read_text(errors="replace")[-100_000:]
+            )
+    return diagnostics, logs
+
 
 def seed_agora_credentials(attempt_ws: str | Path) -> Path | None:
     """Write literal Agora creds into the case workspace for agent runtimes."""
@@ -96,6 +244,8 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         "- For this case, use the official Next.js quickstart repository only: "
         "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`.\n"
         f"- Read credentials from `{cred_file}`; the key mapping and `.env.local` write pattern come from the ConvoAI quickstart guidance in this skill.\n"
+        "- In the cloned quickstart, save dependency-install output to `.eval/install.log` and dev-server stdout/stderr to `.eval/dev-server.log`.\n"
+        "- Verify readiness with a real GET request that returns a non-empty body; a listening port or successful HEAD request alone is insufficient.\n"
         "- This is an automated CI evaluation: proceed without confirmation prompts.\n"
     )
 
