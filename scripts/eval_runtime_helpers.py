@@ -98,6 +98,110 @@ def redact_sensitive_text(text: str) -> str:
     return redacted
 
 
+def quickstart_env_status(workspace: str | Path) -> dict[str, object]:
+    """Return redacted facts about the quickstart's credential wiring."""
+    workspace = Path(workspace)
+    candidates = sorted(
+        path
+        for pattern in (".env.local", ".env")
+        for path in workspace.rglob(pattern)
+        if "node_modules" not in path.parts
+    )
+    if not candidates:
+        return {
+            "env_file_found": False,
+            "required_keys_non_empty": False,
+            "contains_known_placeholder": False,
+        }
+
+    values: dict[str, str] = {}
+    for line in candidates[0].read_text(errors="replace").splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        if key in {NEXTJS_APP_ID_KEY, NEXTJS_APP_CERT_KEY}:
+            values[key] = value.strip().strip("'\"")
+
+    placeholders = {
+        "",
+        "[redacted]",
+        "your_agora_app_id",
+        "your_agora_app_certificate",
+        "your_app_id",
+        "your_app_certificate",
+    }
+    required_values = [values.get(NEXTJS_APP_ID_KEY, ""), values.get(NEXTJS_APP_CERT_KEY, "")]
+    return {
+        "env_file_found": True,
+        "required_keys_non_empty": all(required_values),
+        "contains_known_placeholder": any(
+            value.lower() in placeholders
+            or value.startswith("${")
+            or value.startswith("$")
+            for value in required_values
+        ),
+    }
+
+
+def apply_quickstart_evidence_policy(
+    judgment: dict[str, object],
+    credential_status: dict[str, object],
+    page_ready: bool,
+) -> dict[str, object]:
+    """Apply deterministic credential and browser-evidence rules to a judgment."""
+    assertions = judgment.get("assertions")
+    if not isinstance(assertions, list):
+        return judgment
+
+    credentials_wired = (
+        credential_status.get("env_file_found")
+        and credential_status.get("required_keys_non_empty")
+        and not credential_status.get("contains_known_placeholder")
+    )
+    for assertion in assertions:
+        if not isinstance(assertion, dict):
+            continue
+        summary = str(assertion.get("summary", "")).lower()
+        evidence = assertion.setdefault("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+            assertion["evidence"] = evidence
+
+        if credentials_wired and "credential" in summary:
+            assertion["status"] = "pass"
+            evidence.append(
+                "Runner verified both required quickstart env keys are non-empty literals and are not known placeholders."
+            )
+
+        if page_ready and ("browser" in summary or "page loads" in summary):
+            observed = " ".join(str(item) for item in evidence).lower()
+            explicit_api_failure = (
+                ("/api/invite-agent" in observed or "/api/generate-agora-token" in observed)
+                and any(
+                    code in observed
+                    for code in ("http 400", "http 401", "http 403", "http 404", "http 500", "http 502", "http 503")
+                )
+            )
+            if assertion.get("status") == "fail" and not explicit_api_failure:
+                assertion["status"] = "blocked"
+                evidence.append(
+                    "The page loaded, but no failing invite or token response was captured; this does not establish a demo or credential failure."
+                )
+
+    statuses = {
+        str(assertion.get("status", "blocked"))
+        for assertion in assertions
+        if isinstance(assertion, dict)
+    }
+    if "fail" in statuses:
+        judgment["status"] = "fail"
+    elif "blocked" in statuses:
+        judgment["status"] = "blocked"
+    elif assertions:
+        judgment["status"] = "pass"
+    return judgment
+
+
 def find_judgment_json(text: str) -> dict[str, object] | None:
     """Return the last JSON judgment object embedded in evaluator output."""
     cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text or "").strip()
@@ -351,6 +455,7 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         "- For this case, use the official Next.js quickstart repository only: "
         "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`.\n"
         f"- Read credentials from `{cred_file}`; the key mapping and `.env.local` write pattern come from the ConvoAI quickstart guidance in this skill.\n"
+        "- Source that credentials file in the shell, then write `.env.local` with the expanded literal values. Never copy `[REDACTED]` text from tool output or logs into `.env.local`.\n"
         "- Verify readiness with a real GET request that returns a non-empty body; a listening port or successful HEAD request alone is insufficient.\n"
         "- This is an automated CI evaluation: proceed without confirmation prompts.\n"
     )

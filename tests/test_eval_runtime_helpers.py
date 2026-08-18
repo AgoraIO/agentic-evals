@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.eval_runtime_helpers import (
+    apply_quickstart_evidence_policy,
     browser_verification_unavailable,
     classify_evaluator_failure,
     collect_web_runtime_diagnostics,
@@ -12,10 +13,85 @@ from scripts.eval_runtime_helpers import (
     extract_openclaw_command_evidence,
     find_judgment_json,
     redact_sensitive_text,
+    e2e_task_requirements,
+    quickstart_env_status,
 )
 
 
 class EvalRuntimeHelpersTest(unittest.TestCase):
+    def test_evidence_policy_does_not_guess_credentials_or_fail_without_api_evidence(self):
+        judgment = {
+            "status": "fail",
+            "assertions": [
+                {"summary": "Agora credentials are configured.", "status": "fail", "evidence": []},
+                {"summary": "The demo page loads successfully in a browser.", "status": "fail", "evidence": ["The page content disappeared after the click."]},
+            ],
+        }
+
+        updated = apply_quickstart_evidence_policy(
+            judgment,
+            {
+                "env_file_found": True,
+                "required_keys_non_empty": True,
+                "contains_known_placeholder": False,
+            },
+            page_ready=True,
+        )
+
+        self.assertEqual(updated["status"], "blocked")
+        self.assertEqual(updated["assertions"][0]["status"], "pass")
+        self.assertEqual(updated["assertions"][1]["status"], "blocked")
+
+    def test_evidence_policy_keeps_observed_invite_api_failure(self):
+        judgment = {
+            "status": "fail",
+            "assertions": [
+                {
+                    "summary": "The demo page loads successfully in a browser.",
+                    "status": "fail",
+                    "evidence": ["POST /api/invite-agent returned HTTP 401."],
+                }
+            ],
+        }
+
+        updated = apply_quickstart_evidence_policy(judgment, {}, page_ready=True)
+
+        self.assertEqual(updated["status"], "fail")
+        self.assertEqual(updated["assertions"][0]["status"], "fail")
+
+    def test_quickstart_env_status_accepts_literal_values_without_format_guesses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env.local"
+            env_file.write_text(
+                "NEXT_PUBLIC_AGORA_APP_ID=1234567890abcdef1234567890abcdef\n"
+                "NEXT_AGORA_APP_CERTIFICATE=abcdef1234567890abcdef1234567890\n"
+            )
+
+            status = quickstart_env_status(temp_dir)
+
+        self.assertEqual(
+            status,
+            {
+                "env_file_found": True,
+                "required_keys_non_empty": True,
+                "contains_known_placeholder": False,
+            },
+        )
+
+    def test_quickstart_env_status_rejects_explicit_placeholder_or_variable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env.local"
+            env_file.write_text(
+                "NEXT_PUBLIC_AGORA_APP_ID=your_agora_app_id\n"
+                "NEXT_AGORA_APP_CERTIFICATE=${AGORA_APP_CERTIFICATE}\n"
+            )
+
+            status = quickstart_env_status(temp_dir)
+
+        self.assertTrue(status["env_file_found"])
+        self.assertTrue(status["required_keys_non_empty"])
+        self.assertTrue(status["contains_known_placeholder"])
+
     def test_extract_openclaw_command_evidence_requires_completion(self):
         raw = "\n".join([
             '{"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"clone","rawInput":{"command":"git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs.git agent-quickstart-nextjs"}}}}',
@@ -98,6 +174,14 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         self.assertNotIn("test-app-certificate", redacted)
         self.assertIn("NEXT_PUBLIC_AGORA_APP_ID=[REDACTED]", redacted)
         self.assertIn("NEXT_AGORA_APP_CERTIFICATE=[REDACTED]", redacted)
+
+    def test_e2e_task_requirements_prevents_redacted_env_values(self):
+        requirements = e2e_task_requirements(
+            "/tmp/eval", Path("/tmp/eval/.agora-ci-credentials.env")
+        )
+
+        self.assertIn("Source that credentials file in the shell", requirements)
+        self.assertIn("Never copy `[REDACTED]` text", requirements)
 
     def test_collect_web_runtime_diagnostics_captures_logs_and_probe_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:

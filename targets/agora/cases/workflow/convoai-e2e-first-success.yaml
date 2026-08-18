@@ -39,10 +39,10 @@ assert:
     - description: "Agora credentials are configured in the demo's env file."
       pass_criteria:
         - "Session evidence shows the agent writing a .env or .env.local file with non-empty Agora App ID and App Certificate values."
-        - "The env file exists somewhere in the workspace (search recursively for .env.local or .env) and contains NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE with non-placeholder values."
+        - "The env file exists somewhere in the workspace (search recursively for .env.local or .env) and contains non-empty literal NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE values."
       fail_signals:
         - "No env file is written anywhere in the workspace."
-        - "Env file contains empty or placeholder values (e.g. your_agora_app_id)."
+        - "Env file contains an empty value, an explicit placeholder (e.g. your_agora_app_id), or an unexpanded shell variable."
       evidence_scope:
         - "accepted-session.jsonl"
         - "workspace-files"

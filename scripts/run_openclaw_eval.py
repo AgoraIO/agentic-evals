@@ -6,10 +6,13 @@ from json import JSONDecoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
+    apply_quickstart_evidence_policy,
     classify_evaluator_failure,
+    collect_web_runtime_diagnostics,
     create_case_workspace,
     e2e_task_requirements,
     extract_openclaw_command_evidence,
+    quickstart_env_status,
     redact_sensitive_text,
     seed_agora_credentials,
 )
@@ -278,6 +281,12 @@ for case in cases:
         ["find", attempt_ws, "-type", "f", "-maxdepth", "4"],
         capture_output=True, text=True).stdout
     ws_files_short = ws_files[:2000]  # Limit for evaluator prompt
+    credential_status = quickstart_env_status(attempt_ws)
+    runtime_diagnostics, _ = collect_web_runtime_diagnostics(attempt_ws)
+    page_ready = bool(runtime_diagnostics.get("page_ready"))
+    (art_dir / "runtime-diagnostics.json").write_text(
+        json.dumps(runtime_diagnostics, indent=2) + "\n"
+    )
     print(f"Workspace files ({ws_files.count(chr(10))} files):\n{ws_files[:500]}")
 
     # --- Phase 2: Evaluator Agent (using Gemini CLI for reliable text judgment) ---
@@ -294,13 +303,16 @@ for case in cases:
         f"The agent responded:\n{task_response[:1500]}\n\n"
         f"The agent's workspace is at: {attempt_ws}\n"
         f"Files in workspace: {ws_files.count(chr(10))}\n\n"
+        f"Runner credential-wiring facts (values are deliberately unavailable): {json.dumps(credential_status)}\n\n"
+        f"Runner runtime facts: {json.dumps(runtime_diagnostics)}\n\n"
         f"Completed shell commands recorded by the ACP session:\n{chr(10).join(safe_command_evidence)[:10_000]}\n\n"
         f"IMPORTANT: Verify the workspace directly in addition to the recorded command evidence:\n"
         f"- Search for the official quickstart clone: find {attempt_ws} -maxdepth 3 -type d -name 'agent-quickstart-nextjs'\n"
         f"- Also accept nested clones from tarballs: find {attempt_ws} -maxdepth 5 -type d \\( -name 'agent-quickstart-nextjs' -o -name 'agent-quickstart-*' \\)\n"
         f"- In that quickstart directory, verify project files exist: package.json, app/api/invite-agent/, and components/.\n"
         f"- Search for .env.local files recursively: find {attempt_ws} -name '.env.local'\n"
-        f"- If an .env.local exists, verify it contains non-empty NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE values.\n"
+        f"- Treat the runner credential-wiring facts as authoritative for the env-file assertion. Do not infer a placeholder from value length or format.\n"
+        f"- Only attribute an invalid App ID or Certificate to credentials when an observed token/invite API response explicitly reports an authentication or project-configuration error.\n"
         f"- Check if a dev server process is running: ss -ltnp | grep 3000 or curl http://localhost:3000\n"
         f"- Confirm clone provenance: only command evidence from `git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs` "
         "or official tarball source is acceptable for this case.\n"
@@ -308,8 +320,8 @@ for case in cases:
         f"- Run these checks yourself before judging.\n\n"
         f"Check these assertions and tell me pass or fail for each:\n{assertions_text}\n\n"
         f"Write your answer as a JSON object with this structure:\n"
-        '{"case_id":"' + cid + '","status":"pass or fail",'
-        '"assertions":[{"summary":"description","status":"pass or fail","evidence":["what you observed"]}],'
+        '{"case_id":"' + cid + '","status":"pass, fail, or blocked",'
+        '"assertions":[{"summary":"description","status":"pass, fail, or blocked","evidence":["what you observed"]}],'
         '"notes":["any observations"]}\n\n'
         "Please run the verification commands and write the JSON now."
     )
@@ -351,6 +363,9 @@ for case in cases:
 
     parsed = find_judgment_json(safe_eval_response) if eval_exit == 0 else None
     if parsed:
+        parsed = apply_quickstart_evidence_policy(
+            parsed, credential_status, page_ready
+        )
         status = str(parsed.get("status", "blocked")).strip().lower()
         case_result.update({
             "status": status if status in {"pass", "fail", "blocked"} else "blocked",
