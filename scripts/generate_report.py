@@ -54,7 +54,10 @@ for c in cases:
         lines.append(f"- [{a.get('status','?')}] {a.get('summary','')}")
         for e in a.get("evidence", [])[:2]:
             lines.append(f"  - {e}")
-    for n in c.get("notes", []):
+    notes = c.get("notes", [])
+    if isinstance(notes, str):
+        notes = [notes]
+    for n in notes:
         lines.append(f"- note: {n}")
     lines.append("")
 

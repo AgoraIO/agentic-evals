@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 import urllib.error
@@ -96,6 +97,35 @@ def redact_sensitive_text(text: str) -> str:
     for value in sensitive_values:
         redacted = redacted.replace(value, "[REDACTED]")
     return redacted
+
+
+def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
+    """Extract bounded runtime facts from a direct Codex JSON event stream."""
+    dev_command_observed = False
+    successful_get_completed = False
+    for line in raw.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = record.get("item", {})
+        if item.get("type") != "command_execution":
+            continue
+        command = str(item.get("command", "")).lower()
+        output = str(item.get("aggregated_output", "")).lower()
+        dev_command_observed = dev_command_observed or (
+            "npm run dev" in command or "pnpm dev" in command
+        )
+        successful_get_completed = successful_get_completed or (
+            item.get("status") == "completed"
+            and item.get("exit_code") == 0
+            and "curl" in command
+            and any(marker in output for marker in ("get_ok", "get succeeded", "get returned"))
+        )
+    return {
+        "documented_dev_command_observed": dev_command_observed,
+        "successful_get_completed": successful_get_completed,
+    }
 
 
 def quickstart_env_status(workspace: str | Path) -> dict[str, object]:
@@ -427,6 +457,106 @@ def collect_web_runtime_diagnostics(
     return diagnostics, logs
 
 
+def start_nextjs_verification_server(
+    workspace: str | Path, artifact_dir: str | Path, port: int = 3000
+) -> tuple[subprocess.Popen[str] | None, dict[str, object]]:
+    """Restart the quickstart under runner-owned stdio for browser verification."""
+    workspace = Path(workspace)
+    artifact_dir = Path(artifact_dir)
+    app_dir = _find_nextjs_app(workspace)
+    result: dict[str, object] = {
+        "managed_by_runner": False,
+        "ready": False,
+        "reason": None,
+        "replaced_listener_pids": [],
+    }
+    if app_dir is None:
+        result["reason"] = "quickstart app not found"
+        return None, result
+
+    try:
+        listener = subprocess.run(
+            ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pids = [int(value) for value in listener.stdout.split() if value.isdigit()]
+    except OSError as error:
+        result["reason"] = f"could not inspect port {port}: {error}"
+        return None, result
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            result["replaced_listener_pids"].append(pid)
+        except ProcessLookupError:
+            continue
+        except PermissionError as error:
+            result["reason"] = f"could not stop port {port} listener {pid}: {error}"
+            return None, result
+
+    deadline = time.monotonic() + 10
+    while pids and time.monotonic() < deadline:
+        remaining = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                remaining.append(pid)
+            except ProcessLookupError:
+                continue
+        pids = remaining
+        if pids:
+            time.sleep(0.2)
+    if pids:
+        result["reason"] = f"port {port} listener did not stop: {pids}"
+        return None, result
+
+    log_path = artifact_dir / "verification-dev-server.log"
+    try:
+        with log_path.open("w") as log_file:
+            process = subprocess.Popen(
+                ["npm", "run", "dev"],
+                cwd=app_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+            )
+    except OSError as error:
+        result["reason"] = f"could not start verification server: {error}"
+        return None, result
+
+    result.update({"managed_by_runner": True, "pid": process.pid})
+    url = f"http://localhost:{port}/"
+    for _ in range(30):
+        probe = probe_http_endpoint(url, timeout=3)
+        if probe.get("status") and probe.get("body_bytes"):
+            result.update({"ready": True, "reason": "runner verification server ready"})
+            return process, result
+        if process.poll() is not None:
+            result["reason"] = f"verification server exited with code {process.returncode}"
+            return process, result
+        time.sleep(1)
+    result["reason"] = "verification server did not become ready"
+    return process, result
+
+
+def stop_verification_server(process: subprocess.Popen[str] | None) -> None:
+    """Terminate only the runner-owned verification server process group."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def seed_agora_credentials(attempt_ws: str | Path) -> Path | None:
     """Write literal Agora creds into the case workspace for agent runtimes."""
     app_id = os.environ.get(CI_APP_ID_KEY, "")
@@ -457,6 +587,7 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         f"- Read credentials from `{cred_file}`; the key mapping and `.env.local` write pattern come from the ConvoAI quickstart guidance in this skill.\n"
         "- Source that credentials file in the shell, then write `.env.local` with the expanded literal values. Never copy `[REDACTED]` text from tool output or logs into `.env.local`.\n"
         "- Verify readiness with a real GET request that returns a non-empty body; a listening port or successful HEAD request alone is insufficient.\n"
+        "- For the Node/TS quickstart, if `pnpm install` reports `[ERR_PNPM_IGNORED_BUILDS]` and `pnpm dev` exits before Next.js starts, run `npm install --package-lock=false`. Regardless of that install command's exit code, then run the documented `npm run dev` and verify a real non-empty GET before declaring the app unavailable. Do not create pnpm approval configuration or modify tracked quickstart files.\n"
         "- This is an automated CI evaluation: proceed without confirmation prompts.\n"
     )
 

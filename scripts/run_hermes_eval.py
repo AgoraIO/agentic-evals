@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
     collect_web_runtime_diagnostics,
+    apply_quickstart_evidence_policy,
     classify_evaluator_failure,
     create_case_workspace,
     downgrade_browser_infrastructure_failure,
@@ -14,6 +15,9 @@ from eval_runtime_helpers import (
     hermes_env,
     redact_sensitive_text,
     seed_agora_credentials,
+    quickstart_env_status,
+    start_nextjs_verification_server,
+    stop_verification_server,
 )
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -167,6 +171,21 @@ for case in cases:
         + json.dumps(runtime_diagnostics, ensure_ascii=False)
     )
 
+    # The task agent's terminal closes after phase one. Restart the app with
+    # runner-owned file logging so a later Next.js compile cannot write EPIPE
+    # to the agent's closed stdout pipe during browser verification.
+    verification_server, verification_server_facts = start_nextjs_verification_server(
+        attempt_ws, art_dir
+    )
+    verification_diagnostics, verification_logs = collect_web_runtime_diagnostics(
+        attempt_ws
+    )
+    (art_dir / "verification-runtime-diagnostics.json").write_text(
+        json.dumps(verification_diagnostics, indent=2) + "\n"
+    )
+    for log_name, log_text in verification_logs.items():
+        (art_dir / f"verification-{log_name}").write_text(log_text)
+
     # Workspace state
     ws_files = subprocess.run(
         ["find", attempt_ws, "-type", "f", "-maxdepth", "4"],
@@ -186,11 +205,14 @@ for case in cases:
         f"The agent responded:\n{task_response[:1500]}\n\n"
         f"The agent's workspace is at: {attempt_ws}\n"
         f"Files in workspace: {ws_files.count(chr(10))}\n\n"
-        f"Runner-collected runtime diagnostics:\n{json.dumps(runtime_diagnostics, indent=2)}\n\n"
+        f"Task-server runtime diagnostics:\n{json.dumps(runtime_diagnostics, indent=2)}\n"
+        f"Runner verification-server facts:\n{json.dumps(verification_server_facts, indent=2)}\n"
+        f"Runner verification diagnostics:\n{json.dumps(verification_diagnostics, indent=2)}\n\n"
         f"IMPORTANT: Verify by inspecting the workspace directly:\n"
         f"- Check if {attempt_ws}/agent-quickstart-nextjs exists (git clone evidence)\n"
         f"- Check if a .env.local file exists with Agora credentials\n"
-        f"- Use runtime-diagnostics.json and the saved install/dev logs as primary runtime evidence.\n"
+        f"- Use task-server runtime diagnostics to determine whether the task agent started a server.\n"
+        f"- Use the runner verification server for browser and invite-flow checks; it is isolated from the task agent's terminal.\n"
         f"- For browser assertions, invoke the installed agent-browser CLI through shell commands.\n"
         f"- Open http://localhost:3000, activate the Start Conversation button, and inspect the resulting page state.\n"
         f"- Inspect agent-browser network requests for /api/invite-agent; do not infer Invite success from the landing-page GET alone.\n"
@@ -217,6 +239,7 @@ for case in cases:
     t2_end = now()
     t2_dur = (t2_end - t2_start).total_seconds()
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_exit})")
+    stop_verification_server(verification_server)
 
     safe_eval_response = redact_sensitive_text(eval_response)
     safe_eval_stderr = redact_sensitive_text(eval_stderr or "")
@@ -248,6 +271,11 @@ for case in cases:
 
     parsed = find_judgment_json(safe_eval_response) if eval_exit == 0 else None
     if parsed:
+        parsed = apply_quickstart_evidence_policy(
+            parsed,
+            quickstart_env_status(attempt_ws),
+            bool(verification_diagnostics.get("page_ready")),
+        )
         parsed, browser_blocked = downgrade_browser_infrastructure_failure(
             parsed, safe_eval_response + "\n" + safe_eval_stderr
         )
@@ -272,6 +300,8 @@ for case in cases:
         "evaluator_stderr": safe_eval_stderr[:10000],
         "workspace_files": ws_files,
         "runtime_diagnostics": runtime_diagnostics,
+        "verification_server": verification_server_facts,
+        "verification_runtime_diagnostics": verification_diagnostics,
     }
     (art_dir / "accepted-session.json").write_text(
         json.dumps(evidence, indent=2, ensure_ascii=False) + "\n")
