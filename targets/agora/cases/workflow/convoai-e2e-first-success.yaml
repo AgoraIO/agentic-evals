@@ -51,7 +51,6 @@ assert:
       pass_criteria:
         - "Session evidence shows a dev server start command (pnpm dev, npm run dev, or equivalent)."
         - "The final answer includes a local URL (e.g. http://localhost:3000), OR a process is listening on port 3000 at verification time."
-        - "Runner diagnostics include the dependency-install and dev-server logs when the task agent created them."
       fail_signals:
         - "No dev server start command observed."
         - "Final answer does not mention a running URL and no process is listening on port 3000."
@@ -74,8 +73,6 @@ assert:
       evidence_scope:
         - "evaluator-verification"
         - "runtime-diagnostics.json"
-        - "install.log"
-        - "dev-server.log"
 
   forbidden: []
 

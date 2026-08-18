@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Two-phase Gemini CLI evaluation: task agent + evaluator agent."""
-import json, subprocess, os, datetime, yaml, re, sys
+import json, subprocess, os, datetime, yaml, sys
 from pathlib import Path
-from json import JSONDecoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
     create_case_workspace,
+    classify_evaluator_failure,
     e2e_task_requirements,
+    find_judgment_json,
+    redact_sensitive_text,
     seed_agora_credentials,
 )
 
@@ -55,36 +57,6 @@ def run_gemini(prompt, attempt_ws, timeout=600):
     )
 
 
-def strip_ansi(text):
-    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
-
-
-def find_judgment_json(text):
-    cleaned = strip_ansi(text).strip()
-    if not cleaned:
-        return None
-
-    fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
-    for block in reversed(fence_matches):
-        try:
-            parsed = json.loads(block)
-            if isinstance(parsed, dict) and ("status" in parsed or "assertions" in parsed):
-                return parsed
-        except Exception:
-            pass
-
-    decoder = JSONDecoder()
-    for i, ch in enumerate(cleaned):
-        if ch != "{":
-            continue
-        try:
-            obj, _ = decoder.raw_decode(cleaned[i:])
-            if isinstance(obj, dict) and ("status" in obj or "assertions" in obj):
-                return obj
-        except Exception:
-            continue
-    return None
-
 for case in cases:
     cid = case["case_id"]
     print(f"\n{'='*60}")
@@ -125,23 +97,33 @@ for case in cases:
     t1_dur = (t1_end - t1_start).total_seconds()
     print(f"Phase 1 completed in {t1_dur:.0f}s (exit={task_result.returncode})")
 
+    if task_result.stderr:
+        if task_result.returncode == 55:
+            print(f"Phase 1 stderr (full): {task_result.stderr}")
+        else:
+            print(f"Phase 1 stderr (first 300): {task_result.stderr[:300]}")
+
     # Parse task output
     art_dir = run_dir / "case-artifacts" / cid
     art_dir.mkdir(parents=True, exist_ok=True)
-    (art_dir / "task-agent-raw.json").write_text(task_result.stdout)
-    if task_result.stderr:
-        print(f"Phase 1 stderr (full): {task_result.stderr}")
-        (art_dir / "task-agent-stderr.txt").write_text(task_result.stderr)
+    safe_task_stdout = redact_sensitive_text(task_result.stdout)
+    safe_task_stderr = redact_sensitive_text(task_result.stderr or "")
+    (art_dir / "task-agent-raw.json").write_text(safe_task_stdout)
+    (art_dir / "task-agent-diagnostics.json").write_text(json.dumps({
+        "exit_code": task_result.returncode,
+        "stdout_bytes": len(safe_task_stdout.encode()),
+        "stderr": safe_task_stderr[-10_000:],
+    }, indent=2) + "\n")
 
     task_response = ""
     task_tools = {}
     try:
-        task_data = json.loads(task_result.stdout)
+        task_data = json.loads(safe_task_stdout)
         task_response = task_data.get("response", "")
         task_tools = task_data.get("stats", {}).get("tools", {}).get("byName", {})
     except Exception as e:
         print(f"Phase 1 JSON parse error: {e}")
-        task_response = task_result.stdout[:5000]
+        task_response = safe_task_stdout[:5000]
 
     print(f"\nPhase 1 response (first 500):\n{task_response[:500]}")
     print(f"\nPhase 1 tools: {json.dumps(task_tools)}")
@@ -175,34 +157,67 @@ for case in cases:
         '"notes": ["..."]}'
     )
 
-    eval_result = run_gemini(eval_prompt, attempt_ws, timeout=300)
+    try:
+        eval_result = run_gemini(eval_prompt, attempt_ws, timeout=300)
+    except subprocess.TimeoutExpired:
+        eval_result = subprocess.CompletedProcess([], -1, "", "TIMEOUT after 300s")
+
+    initial_response = ""
+    if eval_result.returncode == 0:
+        try:
+            initial_response = json.loads(eval_result.stdout).get("response", "")
+        except json.JSONDecodeError:
+            initial_response = eval_result.stdout
+    if eval_result.returncode == 0 and not find_judgment_json(initial_response):
+        print("Evaluator did not return a valid judgment; retrying once.")
+        retry_prompt = (
+            eval_prompt
+            + "\nReturn one JSON judgment object now. Do not call tools or add commentary."
+        )
+        try:
+            eval_result = run_gemini(retry_prompt, attempt_ws, timeout=300)
+        except subprocess.TimeoutExpired:
+            eval_result = subprocess.CompletedProcess([], -1, "", "TIMEOUT after 300s")
     t2_end = now()
     t2_dur = (t2_end - t2_start).total_seconds()
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_result.returncode})")
 
-    (art_dir / "evaluator-raw.json").write_text(eval_result.stdout)
     if eval_result.stderr:
-        print(f"Phase 2 stderr (full): {eval_result.stderr}")
-        (art_dir / "evaluator-stderr.txt").write_text(eval_result.stderr)
+        if eval_result.returncode == 55:
+            print(f"Phase 2 stderr (full): {eval_result.stderr}")
+        else:
+            print(f"Phase 2 stderr (first 300): {eval_result.stderr[:300]}")
+
+    safe_eval_stdout = redact_sensitive_text(eval_result.stdout)
+    safe_eval_stderr = redact_sensitive_text(eval_result.stderr or "")
+    (art_dir / "evaluator-raw.json").write_text(safe_eval_stdout)
+    (art_dir / "evaluator-diagnostics.json").write_text(json.dumps({
+        "exit_code": eval_result.returncode,
+        "stdout_bytes": len(safe_eval_stdout.encode()),
+        "stderr": safe_eval_stderr[-10_000:],
+    }, indent=2) + "\n")
 
     # Parse evaluator response
     eval_response = ""
     try:
-        eval_data = json.loads(eval_result.stdout)
+        eval_data = json.loads(safe_eval_stdout)
         eval_response = eval_data.get("response", "")
     except Exception as e:
         print(f"Phase 2 JSON parse error: {e}")
-        eval_response = eval_result.stdout[:5000]
+        eval_response = safe_eval_stdout[:5000]
 
     print(f"\nPhase 2 response (first 800):\n{eval_response[:800]}")
 
     # Extract judgment JSON
+    blocked_reason, failure_note = classify_evaluator_failure(
+        eval_result.returncode, eval_response or eval_result.stdout
+    )
     case_result = {
         "case_id": cid,
         "status": "blocked",
-        "blocked_reason": "evaluator-parse-error",
+        "blocked_reason": blocked_reason,
         "assertions": [],
-        "notes": ["Could not parse evaluator response"],
+        "notes": [failure_note],
         "task_started_at": t1_start.isoformat(),
         "task_completed_at": t1_end.isoformat(),
         "task_duration_s": round(t1_dur),
@@ -213,7 +228,11 @@ for case in cases:
         "workspace_root": attempt_ws,
     }
 
-    parsed = find_judgment_json(eval_response or eval_result.stdout)
+    parsed = (
+        find_judgment_json(eval_response or safe_eval_stdout)
+        if eval_result.returncode == 0
+        else None
+    )
     if parsed:
         status = str(parsed.get("status", "blocked")).strip().lower()
         case_result.update({
@@ -230,10 +249,10 @@ for case in cases:
 
     # Evidence bundle
     evidence = {
-        "task_agent_output": task_result.stdout[:50000],
-        "task_agent_stderr": task_result.stderr[:50000],
-        "evaluator_output": eval_result.stdout[:50000],
-        "evaluator_stderr": eval_result.stderr[:50000],
+        "task_agent_output": safe_task_stdout[:50000],
+        "task_agent_stderr": safe_task_stderr[:10000],
+        "evaluator_output": safe_eval_stdout[:50000],
+        "evaluator_stderr": safe_eval_stderr[:10000],
         "workspace_files": ws_files,
     }
     (art_dir / "accepted-session.json").write_text(

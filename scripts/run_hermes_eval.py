@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Two-phase Hermes Agent evaluation: task agent + Codex evaluator."""
-import json, subprocess, os, datetime, re, sys
+import json, subprocess, os, datetime, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
     collect_web_runtime_diagnostics,
+    classify_evaluator_failure,
     create_case_workspace,
+    downgrade_browser_infrastructure_failure,
     e2e_task_requirements,
+    find_judgment_json,
     hermes_env,
     redact_sensitive_text,
     seed_agora_credentials,
@@ -84,21 +87,22 @@ def run_evaluator(prompt, timeout=300):
             auth = json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": api_key})
             (codex_home / "auth.json").write_text(auth)
 
+    output_path = Path("/tmp/codex-eval-output.md")
+    output_path.unlink(missing_ok=True)
     cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "danger-full-access",
-           "--output-last-message", "/tmp/codex-eval-output.md"]
+           "--output-last-message", str(output_path)]
     print(f"  [eval] Running codex exec for judgment...")
     try:
         result = subprocess.run(
-            cmd, input=prompt, stdout=subprocess.PIPE, stderr=None,
+            cmd, input=prompt, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, timeout=timeout
         )
-        output_path = Path("/tmp/codex-eval-output.md")
         if output_path.exists():
-            return output_path.read_text(), result.returncode
-        return result.stdout, result.returncode
+            return output_path.read_text(), result.returncode, result.stderr
+        return result.stdout, result.returncode, result.stderr
     except subprocess.TimeoutExpired:
         print(f"  [eval] TIMEOUT after {timeout}s")
-        return "", -1
+        return "", -1, f"TIMEOUT after {timeout}s"
 
 
 for case in cases:
@@ -200,22 +204,38 @@ for case in cases:
         "Please run the verification commands and write the JSON now."
     )
 
-    eval_response, eval_exit = run_evaluator(eval_prompt)
+    eval_response, eval_exit, eval_stderr = run_evaluator(eval_prompt)
+    parsed = find_judgment_json(eval_response) if eval_exit == 0 else None
+    if eval_exit == 0 and not parsed:
+        print("Evaluator did not return a valid judgment; retrying once.")
+        retry_prompt = (
+            eval_prompt
+            + "\nReturn one JSON judgment object now. Do not call tools or add commentary."
+        )
+        eval_response, eval_exit, eval_stderr = run_evaluator(retry_prompt)
+        parsed = find_judgment_json(eval_response) if eval_exit == 0 else None
     t2_end = now()
     t2_dur = (t2_end - t2_start).total_seconds()
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_exit})")
 
     safe_eval_response = redact_sensitive_text(eval_response)
+    safe_eval_stderr = redact_sensitive_text(eval_stderr or "")
     (art_dir / "evaluator-raw.txt").write_text(safe_eval_response)
+    (art_dir / "evaluator-diagnostics.json").write_text(json.dumps({
+        "exit_code": eval_exit,
+        "stdout_bytes": len(eval_response.encode()),
+        "stderr": safe_eval_stderr[-10_000:],
+    }, indent=2) + "\n")
     print(f"Phase 2 response (first 800):\n{safe_eval_response[:800]}")
 
     # Parse judgment
+    blocked_reason, failure_note = classify_evaluator_failure(eval_exit, safe_eval_response)
     case_result = {
         "case_id": cid,
         "status": "blocked",
-        "blocked_reason": "evaluator-parse-error",
+        "blocked_reason": blocked_reason,
         "assertions": [],
-        "notes": ["Could not parse evaluator response"],
+        "notes": [failure_note],
         "task_started_at": t1_start.isoformat(),
         "task_completed_at": t1_end.isoformat(),
         "task_duration_s": round(t1_dur),
@@ -226,18 +246,18 @@ for case in cases:
         "workspace_root": attempt_ws,
     }
 
-    json_match = re.search(r'\{[\s\S]*\}', safe_eval_response)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group())
-            case_result.update({
-                "status": parsed.get("status", "blocked"),
-                "assertions": parsed.get("assertions", []),
-                "notes": parsed.get("notes", []),
-                "blocked_reason": None,
-            })
-        except Exception as e:
-            print(f"Judgment parse error: {e}")
+    parsed = find_judgment_json(safe_eval_response) if eval_exit == 0 else None
+    if parsed:
+        parsed, browser_blocked = downgrade_browser_infrastructure_failure(
+            parsed, safe_eval_response + "\n" + safe_eval_stderr
+        )
+        status = str(parsed.get("status", "blocked")).strip().lower()
+        case_result.update({
+            "status": status if status in {"pass", "fail", "blocked"} else "blocked",
+            "assertions": parsed.get("assertions", []),
+            "notes": parsed.get("notes", []),
+            "blocked_reason": "environment" if browser_blocked else None,
+        })
 
     safe_case_result = redact_sensitive_text(json.dumps(case_result, indent=2))
     (run_dir / "case-results" / f"{cid}.json").write_text(
@@ -249,6 +269,7 @@ for case in cases:
         "task_agent_output": safe_task_stdout[:50000],
         "task_agent_stderr": safe_task_stderr[:10000],
         "evaluator_output": safe_eval_response[:50000],
+        "evaluator_stderr": safe_eval_stderr[:10000],
         "workspace_files": ws_files,
         "runtime_diagnostics": runtime_diagnostics,
     }

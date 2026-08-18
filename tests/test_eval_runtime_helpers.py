@@ -5,12 +5,81 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.eval_runtime_helpers import (
+    browser_verification_unavailable,
+    classify_evaluator_failure,
     collect_web_runtime_diagnostics,
+    downgrade_browser_infrastructure_failure,
+    extract_openclaw_command_evidence,
+    find_judgment_json,
     redact_sensitive_text,
 )
 
 
 class EvalRuntimeHelpersTest(unittest.TestCase):
+    def test_extract_openclaw_command_evidence_requires_completion(self):
+        raw = "\n".join([
+            '{"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"clone","rawInput":{"command":"git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs.git agent-quickstart-nextjs"}}}}',
+            '{"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"clone","status":"completed"}}}',
+            '{"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"pending","rawInput":{"command":"pnpm dev"}}}}',
+        ])
+
+        self.assertEqual(
+            extract_openclaw_command_evidence(raw),
+            ["git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs.git agent-quickstart-nextjs"],
+        )
+
+    def test_browser_infrastructure_failure_blocks_only_browser_assertion(self):
+        judgment = {
+            "status": "fail",
+            "assertions": [
+                {"summary": "The demo page loads successfully in a browser.", "status": "fail", "evidence": []},
+                {"summary": "Credentials are configured.", "status": "pass", "evidence": []},
+            ],
+            "notes": [],
+        }
+        diagnostics = "agent-browser: Failed to connect: daemon may be busy or unresponsive"
+
+        updated, changed = downgrade_browser_infrastructure_failure(judgment, diagnostics)
+
+        self.assertTrue(browser_verification_unavailable(diagnostics))
+        self.assertTrue(changed)
+        self.assertEqual(updated["status"], "blocked")
+        self.assertEqual(updated["assertions"][0]["status"], "blocked")
+    def test_find_judgment_json_skips_unrelated_objects(self):
+        output = (
+            "checked {\"status\": \"running\"}\n"
+            "prefix {\"status\": \"running\"}\n"
+            "```json\n{\"case_id\": \"case\", \"status\": \"pass\", \"assertions\": []}\n```"
+        )
+
+        judgment = find_judgment_json(output)
+
+        self.assertEqual(judgment["status"], "pass")
+
+    def test_classify_evaluator_failure_distinguishes_execution_empty_and_parse(self):
+        self.assertEqual(
+            classify_evaluator_failure(1, "endpoint rejected request"),
+            ("evaluator-execution-error", "Evaluator exited with code 1."),
+        )
+        self.assertEqual(
+            classify_evaluator_failure(0, ""),
+            ("evaluator-empty-output", "Evaluator completed without a final response."),
+        )
+        self.assertEqual(
+            classify_evaluator_failure(0, "not json"),
+            (
+                "evaluator-parse-error",
+                "Evaluator response did not contain a valid judgment JSON object.",
+            ),
+        )
+
+    def test_find_judgment_json_accepts_a_single_unfenced_object(self):
+        judgment = find_judgment_json(
+            'prefix {"case_id": "case", "status": "fail", "assertions": []}'
+        )
+
+        self.assertEqual(judgment["status"], "fail")
+
     def test_redact_sensitive_text_removes_credentials_everywhere(self):
         env = {
             "AGORA_APP_ID": "test-app-id",
@@ -55,20 +124,12 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
                 ),
                 patch(
                     "scripts.eval_runtime_helpers.probe_http_endpoint",
-                    side_effect=[
-                        {
-                            "url": "http://localhost:3000/",
-                            "status": 200,
-                            "body_bytes": 512,
-                            "error": None,
-                        },
-                        {
-                            "url": "http://localhost:3000/api/generate-agora-token",
-                            "status": None,
-                            "body_bytes": 0,
-                            "error": "timed out",
-                        },
-                    ],
+                    return_value={
+                        "url": "http://localhost:3000/",
+                        "status": 200,
+                        "body_bytes": 512,
+                        "error": None,
+                    },
                 ),
             ):
                 diagnostics, logs = collect_web_runtime_diagnostics(workspace)
@@ -76,7 +137,7 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         self.assertEqual(diagnostics["app_dir"], "agent-quickstart-nextjs")
         self.assertEqual(diagnostics["denied_build_scripts"], ["esbuild"])
         self.assertEqual(diagnostics["probes"][0]["body_bytes"], 512)
-        self.assertEqual(diagnostics["probes"][1]["error"], "timed out")
+        self.assertEqual(len(diagnostics["probes"]), 1)
         self.assertTrue(diagnostics["page_ready"])
         self.assertNotIn("test-app-certificate", logs["install.log"])
         self.assertIn("[REDACTED]", logs["install.log"])

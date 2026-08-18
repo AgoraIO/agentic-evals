@@ -6,8 +6,11 @@ from json import JSONDecoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
+    classify_evaluator_failure,
     create_case_workspace,
     e2e_task_requirements,
+    extract_openclaw_command_evidence,
+    redact_sensitive_text,
     seed_agora_credentials,
 )
 from openclaw_acpx import AcpxClient, AcpxCommandError
@@ -36,6 +39,7 @@ print(f"Cases: {len(cases)}", flush=True)
 
 repo_root = Path.cwd()
 print(f"repo_root: {repo_root}", flush=True)
+TASK_TIMEOUT_SECONDS = 900
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -223,7 +227,13 @@ for case in cases:
         f"- Give the exact answer you would send to the user."
     )
 
-    task_raw, task_exit = run_openclaw(task_prompt, timeout=600, label="task", cwd=attempt_ws)
+    task_prompt += (
+        "\n- Do not give your final answer until the dev server is running and a non-empty GET succeeds.\n"
+        "- After dependency installation succeeds, start the dev server immediately before further diagnosis.\n"
+    )
+    task_raw, task_exit = run_openclaw(
+        task_prompt, timeout=TASK_TIMEOUT_SECONDS, label="task", cwd=attempt_ws
+    )
 
     # Retry up to 2 more times if the agent times out or produces no output
     MAX_RETRIES = 3
@@ -240,7 +250,7 @@ for case in cases:
         task_client.set_elevated()
         time.sleep(2)
         task_raw, task_exit = run_openclaw(
-            task_prompt, timeout=600, label=f"task-retry{attempt}", cwd=attempt_ws
+            task_prompt, timeout=TASK_TIMEOUT_SECONDS, label=f"task-retry{attempt}", cwd=attempt_ws
         )
 
     t1_end = now()
@@ -255,6 +265,10 @@ for case in cases:
 
     task_response = extract_response_text(task_raw)
     task_tools = extract_tool_calls(task_raw)
+    command_evidence = extract_openclaw_command_evidence(task_raw)
+    safe_command_evidence = [
+        redact_sensitive_text(command) for command in command_evidence
+    ]
     print(f"Phase 1 response (first 500):\n{task_response[:500]}")
     print(f"Phase 1 tool calls: {len(task_tools)}")
     (art_dir / "final-answer.txt").write_text(task_response + "\n")
@@ -280,7 +294,8 @@ for case in cases:
         f"The agent responded:\n{task_response[:1500]}\n\n"
         f"The agent's workspace is at: {attempt_ws}\n"
         f"Files in workspace: {ws_files.count(chr(10))}\n\n"
-        f"IMPORTANT: The ACP protocol does not record tool calls, so you MUST verify by inspecting the workspace directly:\n"
+        f"Completed shell commands recorded by the ACP session:\n{chr(10).join(safe_command_evidence)[:10_000]}\n\n"
+        f"IMPORTANT: Verify the workspace directly in addition to the recorded command evidence:\n"
         f"- Search for the official quickstart clone: find {attempt_ws} -maxdepth 3 -type d -name 'agent-quickstart-nextjs'\n"
         f"- Also accept nested clones from tarballs: find {attempt_ws} -maxdepth 5 -type d \\( -name 'agent-quickstart-nextjs' -o -name 'agent-quickstart-*' \\)\n"
         f"- In that quickstart directory, verify project files exist: package.json, app/api/invite-agent/, and components/.\n"
@@ -306,7 +321,8 @@ for case in cases:
     eval_events = 1  # Codex returns single response
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_exit})")
 
-    (art_dir / "evaluator-raw.txt").write_text(eval_response)
+    safe_eval_response = redact_sensitive_text(eval_response)
+    (art_dir / "evaluator-raw.txt").write_text(safe_eval_response)
 
     print(f"Phase 2 response (first 800):\n{eval_response[:800]}")
 
@@ -316,12 +332,13 @@ for case in cases:
         print(eval_response[:1000])
 
     # Parse judgment
+    blocked_reason, failure_note = classify_evaluator_failure(eval_exit, safe_eval_response)
     case_result = {
         "case_id": cid,
         "status": "blocked",
-        "blocked_reason": "evaluator-parse-error",
+        "blocked_reason": blocked_reason,
         "assertions": [],
-        "notes": ["Could not parse evaluator response"],
+        "notes": [failure_note],
         "task_started_at": t1_start.isoformat(),
         "task_completed_at": t1_end.isoformat(),
         "task_duration_s": round(t1_dur),
@@ -332,7 +349,7 @@ for case in cases:
         "workspace_root": attempt_ws,
     }
 
-    parsed = find_judgment_json(eval_response)
+    parsed = find_judgment_json(safe_eval_response) if eval_exit == 0 else None
     if parsed:
         status = str(parsed.get("status", "blocked")).strip().lower()
         case_result.update({
@@ -350,7 +367,8 @@ for case in cases:
     # Evidence
     evidence = {
         "task_agent_output": task_raw[:50000],
-        "evaluator_output": eval_response[:50000],
+        "evaluator_output": safe_eval_response[:50000],
+        "completed_commands": safe_command_evidence,
         "workspace_files": ws_files,
     }
     (art_dir / "accepted-session.json").write_text(

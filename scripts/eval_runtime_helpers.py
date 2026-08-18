@@ -9,6 +9,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from json import JSONDecoder
 from pathlib import Path
 
 
@@ -97,6 +98,115 @@ def redact_sensitive_text(text: str) -> str:
     return redacted
 
 
+def find_judgment_json(text: str) -> dict[str, object] | None:
+    """Return the last JSON judgment object embedded in evaluator output."""
+    cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text or "").strip()
+    if not cleaned:
+        return None
+
+    fenced = re.findall(
+        r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE
+    )
+    candidates = [*reversed(fenced), cleaned]
+    decoder = JSONDecoder()
+    for candidate in candidates:
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and {"status", "assertions"} <= parsed.keys():
+                return parsed
+    return None
+
+
+def classify_evaluator_failure(exit_code: int, output: str) -> tuple[str, str]:
+    """Classify evaluator failures before attempting result JSON parsing."""
+    if exit_code != 0:
+        return "evaluator-execution-error", f"Evaluator exited with code {exit_code}."
+    if not output.strip():
+        return "evaluator-empty-output", "Evaluator completed without a final response."
+    return "evaluator-parse-error", "Evaluator response did not contain a valid judgment JSON object."
+
+
+def extract_openclaw_command_evidence(raw_json: str) -> list[str]:
+    """Return completed shell commands from OpenClaw ACP event history."""
+    pending: dict[str, str] = {}
+    completed: list[str] = []
+    for line in raw_json.splitlines():
+        try:
+            update = json.loads(line).get("params", {}).get("update", {})
+        except json.JSONDecodeError:
+            continue
+        event_type = update.get("sessionUpdate")
+        call_id = update.get("toolCallId", "")
+        raw_input = update.get("rawInput", {})
+        command = raw_input.get("command") if isinstance(raw_input, dict) else None
+        if event_type == "tool_call" and call_id and isinstance(command, str):
+            pending[call_id] = command
+        elif event_type == "tool_call_update" and update.get("status") == "completed":
+            command = pending.pop(call_id, None)
+            if command:
+                completed.append(command)
+    return list(dict.fromkeys(completed))
+
+
+_BROWSER_RUNTIME_MARKERS = (
+    "failed to connect:",
+    "daemon may be busy or unresponsive",
+    "could not start daemon",
+    "socket directory",
+)
+
+
+def browser_verification_unavailable(text: str) -> bool:
+    """Recognize agent-browser infrastructure failures, not page failures."""
+    lowered = (text or "").lower()
+    return "agent-browser" in lowered and any(
+        marker in lowered for marker in _BROWSER_RUNTIME_MARKERS
+    )
+
+
+def downgrade_browser_infrastructure_failure(
+    judgment: dict[str, object], diagnostics: str
+) -> tuple[dict[str, object], bool]:
+    """Convert browser-only false failures to blocked when the CLI was unavailable."""
+    if not browser_verification_unavailable(diagnostics):
+        return judgment, False
+
+    assertions = judgment.get("assertions")
+    if not isinstance(assertions, list):
+        return judgment, False
+
+    changed = False
+    for assertion in assertions:
+        if not isinstance(assertion, dict) or assertion.get("status") != "fail":
+            continue
+        summary = str(assertion.get("summary", "")).lower()
+        if "browser" in summary or "page loads" in summary:
+            assertion["status"] = "blocked"
+            evidence = assertion.setdefault("evidence", [])
+            if isinstance(evidence, list):
+                evidence.append(
+                    "agent-browser infrastructure was unavailable; this does not establish a demo failure."
+                )
+            changed = True
+
+    if changed and not any(
+        isinstance(assertion, dict) and assertion.get("status") == "fail"
+        for assertion in assertions
+    ):
+        judgment["status"] = "blocked"
+        notes = judgment.setdefault("notes", [])
+        if isinstance(notes, list):
+            notes.append(
+                "Browser verification was blocked by agent-browser infrastructure, not judged as a demo failure."
+            )
+    return judgment, changed
+
+
 def probe_http_endpoint(url: str, timeout: int = 10) -> dict[str, object]:
     """Probe an endpoint without persisting its potentially sensitive response body."""
     started = time.monotonic()
@@ -179,9 +289,6 @@ def collect_web_runtime_diagnostics(
         "build_policy_error": build_policy_error,
         "probes": [
             probe_http_endpoint("http://localhost:3000/"),
-            probe_http_endpoint(
-                "http://localhost:3000/api/generate-agora-token"
-            ),
         ],
     }
     home_probe = diagnostics["probes"][0]
@@ -244,7 +351,6 @@ def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str
         "- For this case, use the official Next.js quickstart repository only: "
         "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`.\n"
         f"- Read credentials from `{cred_file}`; the key mapping and `.env.local` write pattern come from the ConvoAI quickstart guidance in this skill.\n"
-        "- In the cloned quickstart, save dependency-install output to `.eval/install.log` and dev-server stdout/stderr to `.eval/dev-server.log`.\n"
         "- Verify readiness with a real GET request that returns a non-empty body; a listening port or successful HEAD request alone is insufficient.\n"
         "- This is an automated CI evaluation: proceed without confirmation prompts.\n"
     )
