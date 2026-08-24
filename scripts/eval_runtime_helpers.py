@@ -261,6 +261,8 @@ def extract_openclaw_command_evidence(raw_json: str) -> list[str]:
 
 _BROWSER_RUNTIME_MARKERS = (
     "failed to connect:",
+    "daemon failed to start",
+    "daemon process exited during startup",
     "daemon may be busy or unresponsive",
     "could not start daemon",
     "socket directory",
@@ -430,9 +432,12 @@ def collect_web_runtime_diagnostics(
 
 
 def start_nextjs_verification_server(
-    workspace: str | Path, artifact_dir: str | Path, port: int = 3000
+    workspace: str | Path,
+    artifact_dir: str | Path,
+    port: int = 3000,
+    replace_owned_listener: bool = False,
 ) -> tuple[subprocess.Popen[str] | None, dict[str, object]]:
-    """Restart the quickstart under runner-owned stdio for browser verification."""
+    """Start a runner-owned server, replacing a listener only when ownership is known."""
     workspace = Path(workspace)
     artifact_dir = Path(artifact_dir)
     app_dir = _find_nextjs_app(workspace)
@@ -440,21 +445,23 @@ def start_nextjs_verification_server(
         "managed_by_runner": False,
         "ready": False,
         "reason": None,
+        "replaced_listener_pids": [],
     }
     if app_dir is None:
         result["reason"] = "quickstart app not found"
         return None, result
 
     url = f"http://localhost:{port}/"
-    initial_probe = probe_http_endpoint(url, timeout=3)
-    initial_status = initial_probe.get("status")
-    if (
-        isinstance(initial_status, int)
-        and 200 <= initial_status < 400
-        and initial_probe.get("body_bytes")
-    ):
-        result.update({"ready": True, "reason": "task server remained available"})
-        return None, result
+    if not replace_owned_listener:
+        initial_probe = probe_http_endpoint(url, timeout=3)
+        initial_status = initial_probe.get("status")
+        if (
+            isinstance(initial_status, int)
+            and 200 <= initial_status < 400
+            and initial_probe.get("body_bytes")
+        ):
+            result.update({"ready": True, "reason": "task server remained available"})
+            return None, result
 
     try:
         listener = subprocess.run(
@@ -468,8 +475,34 @@ def start_nextjs_verification_server(
         result["reason"] = f"could not inspect port {port}: {error}"
         return None, result
 
-    if pids:
+    if pids and not replace_owned_listener:
         result["reason"] = f"port {port} is occupied by an unowned listener: {pids}"
+        return None, result
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            result["replaced_listener_pids"].append(pid)
+        except ProcessLookupError:
+            continue
+        except PermissionError as error:
+            result["reason"] = f"could not stop owned listener {pid}: {error}"
+            return None, result
+
+    deadline = time.monotonic() + 10
+    while pids and time.monotonic() < deadline:
+        remaining = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                remaining.append(pid)
+            except ProcessLookupError:
+                continue
+        pids = remaining
+        if pids:
+            time.sleep(0.2)
+    if pids:
+        result["reason"] = f"owned listener did not stop: {pids}"
         return None, result
 
     log_path = artifact_dir / "verification-dev-server.log"

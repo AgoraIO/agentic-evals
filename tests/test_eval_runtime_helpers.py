@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -42,7 +43,7 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         case_text = case_path.read_text()
         case_data = {
             "verification": [
-                "Use agent-browser.",
+                "Use agent-browser --session eval-browser.",
                 "Activate Start Conversation.",
                 "Inspect /api/invite-agent and require state `RUNNING`.",
             ]
@@ -52,6 +53,7 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
 
         for marker in (
             "agent-browser",
+            "--session eval-browser",
             "Start Conversation",
             "/api/invite-agent",
             "state `RUNNING`",
@@ -118,6 +120,11 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         updated, changed = downgrade_browser_infrastructure_failure(judgment, diagnostics)
 
         self.assertTrue(browser_verification_unavailable(diagnostics))
+        self.assertTrue(
+            browser_verification_unavailable(
+                "agent-browser: Daemon failed to start during browser verification"
+            )
+        )
         self.assertTrue(changed)
         self.assertEqual(updated["status"], "blocked")
         self.assertEqual(updated["assertions"][0]["status"], "blocked")
@@ -289,6 +296,52 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         self.assertFalse(facts["managed_by_runner"])
         self.assertEqual(facts["reason"], "task server remained available")
         popen.assert_not_called()
+
+    def test_verification_server_restarts_caller_owned_listener(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            app_dir = workspace / "agent-quickstart-nextjs"
+            artifact_dir = workspace / "artifacts"
+            app_dir.mkdir()
+            artifact_dir.mkdir()
+            (app_dir / "package.json").write_text(
+                '{"name":"convoai-quickstart-web-nextjs"}\n'
+            )
+            process = unittest.mock.MagicMock(pid=99)
+
+            def kill_process(_pid, requested_signal):
+                if requested_signal == 0:
+                    raise ProcessLookupError
+                self.assertEqual(requested_signal, signal.SIGTERM)
+
+            with (
+                patch(
+                    "scripts.eval_runtime_helpers.probe_http_endpoint",
+                    return_value={"status": 200, "body_bytes": 128, "error": None},
+                ),
+                patch(
+                    "scripts.eval_runtime_helpers.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 0, stdout="42\n", stderr=""
+                    ),
+                ),
+                patch(
+                    "scripts.eval_runtime_helpers.subprocess.Popen",
+                    return_value=process,
+                ),
+                patch(
+                    "scripts.eval_runtime_helpers.os.kill",
+                    side_effect=kill_process,
+                ),
+            ):
+                started, facts = start_nextjs_verification_server(
+                    workspace, artifact_dir, replace_owned_listener=True
+                )
+
+        self.assertIs(started, process)
+        self.assertTrue(facts["managed_by_runner"])
+        self.assertTrue(facts["ready"])
+        self.assertEqual(facts["replaced_listener_pids"], [42])
 
 
 if __name__ == "__main__":

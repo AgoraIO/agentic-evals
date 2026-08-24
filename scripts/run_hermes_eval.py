@@ -174,7 +174,7 @@ for case in cases:
     # runner-owned file logging so a later Next.js compile cannot write EPIPE
     # to the agent's closed stdout pipe during browser verification.
     verification_server, verification_server_facts = start_nextjs_verification_server(
-        attempt_ws, art_dir
+        attempt_ws, art_dir, replace_owned_listener=True
     )
     verification_diagnostics, verification_logs = collect_web_runtime_diagnostics(
         attempt_ws
