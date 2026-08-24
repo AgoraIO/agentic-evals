@@ -128,11 +128,19 @@ def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
             continue
         command = str(item.get("command", "")).lower()
         output = str(item.get("aggregated_output", "")).lower()
+        direct_clone = (
+            "git clone" in command
+            and "github.com/agoraio-conversational-ai/agent-quickstart-nextjs"
+            in command
+        )
+        cli_quickstart = (
+            ("agora quickstart create" in command or "agora init" in command)
+            and ("--template nextjs" in command or "--template=nextjs" in command)
+        )
         official_quickstart_clone_observed = official_quickstart_clone_observed or (
             item.get("status") == "completed"
             and item.get("exit_code") == 0
-            and "git clone" in command
-            and "github.com/agoraio-conversational-ai/agent-quickstart-nextjs" in command
+            and (direct_clone or cli_quickstart)
         )
         dev_command_observed = dev_command_observed or (
             "npm run dev" in command or "pnpm dev" in command

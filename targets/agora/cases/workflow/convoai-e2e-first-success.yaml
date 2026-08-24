@@ -34,10 +34,10 @@ assert:
   required:
     - description: "The official Next.js quickstart repo is cloned."
       pass_criteria:
-        - "Session evidence shows a git clone command targeting `agent-quickstart-nextjs` or the GitHub URL `https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`."
+        - "Session evidence shows either a git clone command targeting `agent-quickstart-nextjs` / `https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`, or an Agora CLI `quickstart create` / `init` command using the `nextjs` template."
         - "A directory exists in the workspace containing the quickstart files (package.json with agora dependencies, app/api/invite-agent/, etc.) regardless of the directory name."
       fail_signals:
-        - "No clone command observed — agent generates code from scratch."
+        - "No approved direct-clone or Agora CLI quickstart command observed — agent generates code from scratch."
         - "Agent clones a different repo that is not the official quickstart."
       evidence_scope:
         - "accepted-session.jsonl"

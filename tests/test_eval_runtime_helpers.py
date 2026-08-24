@@ -36,6 +36,13 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         self.assertTrue(facts["official_quickstart_clone_observed"])
         self.assertTrue(facts["demo_env_file_written"])
 
+    def test_codex_runtime_evidence_accepts_official_cli_quickstart(self):
+        raw = '{"type":"item.completed","item":{"type":"command_execution","command":"agora quickstart create agent-quickstart-nextjs --template nextjs --json","status":"completed","exit_code":0}}'
+
+        facts = extract_codex_task_runtime_evidence(raw)
+
+        self.assertTrue(facts["official_quickstart_clone_observed"])
+
     def test_convoai_case_requires_full_browser_verification(self):
         case_path = Path(
             "targets/agora/cases/workflow/convoai-e2e-first-success.yaml"
