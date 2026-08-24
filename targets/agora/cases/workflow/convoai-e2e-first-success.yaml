@@ -22,6 +22,13 @@ setup:
     - "AGORA_APP_CERTIFICATE"
   env_vars_notes: "The demo may use different env var names (e.g. NEXT_PUBLIC_AGORA_APP_ID). The agent should map from AGORA_APP_ID/AGORA_APP_CERTIFICATE to whatever the demo expects."
 
+verification:
+  - "For browser assertions, use only the installed agent-browser CLI through shell commands."
+  - "Open http://localhost:3000, activate Start Conversation, and inspect the resulting page state."
+  - "Inspect agent-browser network requests for /api/invite-agent; do not infer invite success from the landing-page GET alone."
+  - "Treat the invite flow as successful only when its observed response has status 200 and state `RUNNING`."
+  - "If agent-browser infrastructure is unavailable, report blocked(environment) rather than failing the demo."
+
 assert:
   summary: "The agent should clone the official quickstart, configure credentials, start the dev server, and report a working local URL."
   required:

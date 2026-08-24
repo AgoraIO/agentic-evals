@@ -6,7 +6,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
     collect_web_runtime_diagnostics,
-    apply_quickstart_evidence_policy,
     classify_evaluator_failure,
     create_case_workspace,
     downgrade_browser_infrastructure_failure,
@@ -15,9 +14,9 @@ from eval_runtime_helpers import (
     hermes_env,
     redact_sensitive_text,
     seed_agora_credentials,
-    quickstart_env_status,
     start_nextjs_verification_server,
     stop_verification_server,
+    verification_instructions,
 )
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -198,6 +197,7 @@ for case in cases:
 
     case_data = yaml.safe_load(open(case["path"]))
     assertions_text = json.dumps(case_data.get("assert", {}).get("required", []), indent=2)
+    verification_text = verification_instructions(case_data)
 
     eval_prompt = (
         f"Please analyze this agent's work and give me your judgment.\n\n"
@@ -209,15 +209,10 @@ for case in cases:
         f"Runner verification-server facts:\n{json.dumps(verification_server_facts, indent=2)}\n"
         f"Runner verification diagnostics:\n{json.dumps(verification_diagnostics, indent=2)}\n\n"
         f"IMPORTANT: Verify by inspecting the workspace directly:\n"
-        f"- Check if {attempt_ws}/agent-quickstart-nextjs exists (git clone evidence)\n"
-        f"- Check if a .env.local file exists with Agora credentials\n"
         f"- Use task-server runtime diagnostics to determine whether the task agent started a server.\n"
         f"- Use the runner verification server for browser and invite-flow checks; it is isolated from the task agent's terminal.\n"
-        f"- For browser assertions, invoke the installed agent-browser CLI through shell commands.\n"
-        f"- Open http://localhost:3000, activate the Start Conversation button, and inspect the resulting page state.\n"
-        f"- Inspect agent-browser network requests for /api/invite-agent; do not infer Invite success from the landing-page GET alone.\n"
-        f"- A listening process or successful HEAD request is not enough: require a successful GET with a non-empty body.\n"
         f"- Run these checks yourself before judging.\n\n"
+        f"Required verification actions:\n{verification_text}\n\n"
         f"Check these assertions and tell me pass or fail for each:\n{assertions_text}\n\n"
         f"Write your answer as a JSON object with this structure:\n"
         '{"case_id":"' + cid + '","status":"pass or fail",'
@@ -271,11 +266,6 @@ for case in cases:
 
     parsed = find_judgment_json(safe_eval_response) if eval_exit == 0 else None
     if parsed:
-        parsed = apply_quickstart_evidence_policy(
-            parsed,
-            quickstart_env_status(attempt_ws),
-            bool(verification_diagnostics.get("page_ready")),
-        )
         parsed, browser_blocked = downgrade_browser_infrastructure_failure(
             parsed, safe_eval_response + "\n" + safe_eval_stderr
         )

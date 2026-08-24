@@ -173,65 +173,6 @@ def quickstart_env_status(workspace: str | Path) -> dict[str, object]:
     }
 
 
-def apply_quickstart_evidence_policy(
-    judgment: dict[str, object],
-    credential_status: dict[str, object],
-    page_ready: bool,
-) -> dict[str, object]:
-    """Apply deterministic credential and browser-evidence rules to a judgment."""
-    assertions = judgment.get("assertions")
-    if not isinstance(assertions, list):
-        return judgment
-
-    credentials_wired = (
-        credential_status.get("env_file_found")
-        and credential_status.get("required_keys_non_empty")
-        and not credential_status.get("contains_known_placeholder")
-    )
-    for assertion in assertions:
-        if not isinstance(assertion, dict):
-            continue
-        summary = str(assertion.get("summary", "")).lower()
-        evidence = assertion.setdefault("evidence", [])
-        if not isinstance(evidence, list):
-            evidence = []
-            assertion["evidence"] = evidence
-
-        if credentials_wired and "credential" in summary:
-            assertion["status"] = "pass"
-            evidence.append(
-                "Runner verified both required quickstart env keys are non-empty literals and are not known placeholders."
-            )
-
-        if page_ready and ("browser" in summary or "page loads" in summary):
-            observed = " ".join(str(item) for item in evidence).lower()
-            explicit_api_failure = (
-                ("/api/invite-agent" in observed or "/api/generate-agora-token" in observed)
-                and any(
-                    code in observed
-                    for code in ("http 400", "http 401", "http 403", "http 404", "http 500", "http 502", "http 503")
-                )
-            )
-            if assertion.get("status") == "fail" and not explicit_api_failure:
-                assertion["status"] = "blocked"
-                evidence.append(
-                    "The page loaded, but no failing invite or token response was captured; this does not establish a demo or credential failure."
-                )
-
-    statuses = {
-        str(assertion.get("status", "blocked"))
-        for assertion in assertions
-        if isinstance(assertion, dict)
-    }
-    if "fail" in statuses:
-        judgment["status"] = "fail"
-    elif "blocked" in statuses:
-        judgment["status"] = "blocked"
-    elif assertions:
-        judgment["status"] = "pass"
-    return judgment
-
-
 def find_judgment_json(text: str) -> dict[str, object] | None:
     """Return the last JSON judgment object embedded in evaluator output."""
     cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text or "").strip()
@@ -263,6 +204,14 @@ def classify_evaluator_failure(exit_code: int, output: str) -> tuple[str, str]:
     if not output.strip():
         return "evaluator-empty-output", "Evaluator completed without a final response."
     return "evaluator-parse-error", "Evaluator response did not contain a valid judgment JSON object."
+
+
+def verification_instructions(case_data: dict[str, object]) -> str:
+    """Format case-owned verification actions for evaluator prompts."""
+    steps = case_data.get("verification", [])
+    if not isinstance(steps, list):
+        return ""
+    return "\n".join(f"- {step}" for step in steps if isinstance(step, str))
 
 
 def extract_openclaw_command_evidence(raw_json: str) -> list[str]:
@@ -468,10 +417,20 @@ def start_nextjs_verification_server(
         "managed_by_runner": False,
         "ready": False,
         "reason": None,
-        "replaced_listener_pids": [],
     }
     if app_dir is None:
         result["reason"] = "quickstart app not found"
+        return None, result
+
+    url = f"http://localhost:{port}/"
+    initial_probe = probe_http_endpoint(url, timeout=3)
+    initial_status = initial_probe.get("status")
+    if (
+        isinstance(initial_status, int)
+        and 200 <= initial_status < 400
+        and initial_probe.get("body_bytes")
+    ):
+        result.update({"ready": True, "reason": "task server remained available"})
         return None, result
 
     try:
@@ -486,30 +445,8 @@ def start_nextjs_verification_server(
         result["reason"] = f"could not inspect port {port}: {error}"
         return None, result
 
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            result["replaced_listener_pids"].append(pid)
-        except ProcessLookupError:
-            continue
-        except PermissionError as error:
-            result["reason"] = f"could not stop port {port} listener {pid}: {error}"
-            return None, result
-
-    deadline = time.monotonic() + 10
-    while pids and time.monotonic() < deadline:
-        remaining = []
-        for pid in pids:
-            try:
-                os.kill(pid, 0)
-                remaining.append(pid)
-            except ProcessLookupError:
-                continue
-        pids = remaining
-        if pids:
-            time.sleep(0.2)
     if pids:
-        result["reason"] = f"port {port} listener did not stop: {pids}"
+        result["reason"] = f"port {port} is occupied by an unowned listener: {pids}"
         return None, result
 
     log_path = artifact_dir / "verification-dev-server.log"
@@ -529,10 +466,14 @@ def start_nextjs_verification_server(
         return None, result
 
     result.update({"managed_by_runner": True, "pid": process.pid})
-    url = f"http://localhost:{port}/"
     for _ in range(30):
         probe = probe_http_endpoint(url, timeout=3)
-        if probe.get("status") and probe.get("body_bytes"):
+        status = probe.get("status")
+        if (
+            isinstance(status, int)
+            and 200 <= status < 400
+            and probe.get("body_bytes")
+        ):
             result.update({"ready": True, "reason": "runner verification server ready"})
             return process, result
         if process.poll() is not None:
@@ -578,16 +519,11 @@ def seed_agora_credentials(attempt_ws: str | Path) -> Path | None:
 
 
 def e2e_task_requirements(attempt_ws: str | Path, cred_path: Path | None) -> str:
-    """Common E2E task requirements for ConvoAI quickstart cases."""
+    """Provide CI-only context; product behavior comes from the installed Skill."""
     cred_file = cred_path or Path(attempt_ws) / ".agora-ci-credentials.env"
     return (
-        "- Follow the ConvoAI skill flow in this workspace (especially quickstart guidance).\n"
-        "- For this case, use the official Next.js quickstart repository only: "
-        "`https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`.\n"
-        f"- Read credentials from `{cred_file}`; the key mapping and `.env.local` write pattern come from the ConvoAI quickstart guidance in this skill.\n"
-        "- Source that credentials file in the shell, then write `.env.local` with the expanded literal values. Never copy `[REDACTED]` text from tool output or logs into `.env.local`.\n"
-        "- Verify readiness with a real GET request that returns a non-empty body; a listening port or successful HEAD request alone is insufficient.\n"
-        "- For the Node/TS quickstart, if `pnpm install` reports `[ERR_PNPM_IGNORED_BUILDS]` and `pnpm dev` exits before Next.js starts, run `npm install --package-lock=false`. Regardless of that install command's exit code, then run the documented `npm run dev` and verify a real non-empty GET before declaring the app unavailable. Do not create pnpm approval configuration or modify tracked quickstart files.\n"
+        "- Treat the installed Agora Skill as the source of truth for product behavior and commands.\n"
+        f"- CI credentials are available at `{cred_file}`. Apply the mapping defined by the Skill without printing credential values.\n"
         "- This is an automated CI evaluation: proceed without confirmation prompts.\n"
     )
 

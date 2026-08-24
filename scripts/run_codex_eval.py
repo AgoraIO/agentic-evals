@@ -5,10 +5,8 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import yaml
@@ -22,9 +20,11 @@ from eval_runtime_helpers import (
     e2e_task_requirements,
     extract_codex_task_runtime_evidence,
     find_judgment_json,
-    probe_http_endpoint,
     redact_sensitive_text,
     seed_agora_credentials,
+    start_nextjs_verification_server,
+    stop_verification_server,
+    verification_instructions,
 )
 
 RUN_DIR = Path(os.environ["RUN_DIR"])
@@ -73,66 +73,13 @@ def build_task_prompt(case, workspace, credentials):
         f"- Treat {workspace} as your only workspace.\n"
         "- Keep all file reads, writes, and shell commands inside it.\n"
         f"{e2e_task_requirements(workspace, credentials)}"
-        "- When the task requires a local dev server, run the documented command and verify a non-empty GET before claiming the URL is running.\n"
         "- Give the exact answer you would send to the user."
     )
 
 
-def start_verification_server(workspace, artifact_dir):
-    """Start the official app outside the task process for browser verification."""
-    app_dir = Path(workspace) / "agent-quickstart-nextjs"
-    result = {"managed_by_runner": False, "ready": False, "reason": None}
-    initial_probe = probe_http_endpoint("http://localhost:3000/", timeout=3)
-    if initial_probe.get("status") and initial_probe.get("body_bytes"):
-        result.update({"ready": True, "reason": "task server remained available"})
-        return None, result
-    if not (app_dir / "package.json").is_file():
-        result["reason"] = "quickstart package.json was not found"
-        return None, result
-
-    log_path = artifact_dir / "verification-dev-server.log"
-    try:
-        with log_path.open("w") as log_file:
-            process = subprocess.Popen(
-                ["npm", "run", "dev"],
-                cwd=app_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-    except OSError as error:
-        result["reason"] = f"could not start verification server: {error}"
-        return None, result
-
-    result.update({"managed_by_runner": True, "pid": process.pid})
-    for _ in range(30):
-        probe = probe_http_endpoint("http://localhost:3000/", timeout=3)
-        if probe.get("status") and probe.get("body_bytes"):
-            result.update({"ready": True, "reason": "runner verification server ready"})
-            return process, result
-        if process.poll() is not None:
-            result["reason"] = f"verification server exited with code {process.returncode}"
-            return process, result
-        time.sleep(1)
-    result["reason"] = "verification server did not become ready"
-    return process, result
-
-
-def stop_verification_server(process):
-    if process is None or process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
-
-
-def build_verifier_prompt(case, workspace, answer, assertions, diagnostics, task_facts, server):
+def build_verifier_prompt(
+    case, workspace, answer, assertions, verification, diagnostics, task_facts, server
+):
     return (
         "You are an independent evaluator judging another fresh Codex task process.\n"
         "Inspect the workspace and run verification commands before judging.\n\n"
@@ -143,16 +90,9 @@ def build_verifier_prompt(case, workspace, answer, assertions, diagnostics, task
         f"Task process facts: {json.dumps(task_facts)}\n"
         f"Verification-server facts: {json.dumps(server)}\n\n"
         "Verify the workspace before judging:\n"
-        f"- Locate the quickstart under {workspace} and run git remote -v to confirm the official agent-quickstart-nextjs repository.\n"
-        f"- Find .env.local below {workspace}; verify the required Agora keys are non-empty without printing their values.\n"
-        "- Require a successful non-empty GET from the reported local URL, not only a listening port or HEAD request.\n"
-        "- For browser assertions, use only the installed agent-browser CLI through shell commands; do not use Playwright, Selenium, or WebDriver.\n"
-        "- Open http://localhost:3000, activate the Start Conversation button, and inspect the resulting page state.\n"
-        "- Inspect agent-browser network requests for /api/invite-agent; do not infer invite success from the landing-page GET alone.\n"
-        "- Treat the invite flow as successful only when its observed response has status 200 and state \"RUNNING\".\n"
-        "- If agent-browser infrastructure is unavailable, report blocked(environment) rather than failing the demo.\n"
         "- The runner may launch a verification-only server after the task exits; it can prove browser behavior but cannot alone prove the task agent started the server. Use Task process facts for that assertion.\n"
         "- Treat unavailable evidence as blocked rather than inferring pass.\n\n"
+        f"Required verification actions:\n{verification}\n\n"
         f"Assertions:\n{assertions}\n\n"
         "Return only JSON with status, assertions, and notes."
     )
@@ -184,7 +124,9 @@ for case in CASES:
         "exit_code": task_exit, "raw_bytes": len(safe_task_raw.encode()),
     }, indent=2) + "\n")
 
-    verification_server, server_facts = start_verification_server(workspace, artifact_dir)
+    verification_server, server_facts = start_nextjs_verification_server(
+        workspace, artifact_dir
+    )
     diagnostics, runtime_logs = collect_web_runtime_diagnostics(workspace)
     (artifact_dir / "runtime-diagnostics.json").write_text(json.dumps(diagnostics, indent=2) + "\n")
     for name, content in runtime_logs.items():
@@ -195,12 +137,20 @@ for case in CASES:
     ).stdout
     case_data = yaml.safe_load(Path(case["path"]).read_text())
     assertions = json.dumps(case_data.get("assert", {}).get("required", []), indent=2)
+    verification = verification_instructions(case_data)
 
     verification_started = now()
     verifier_output = artifact_dir / "evaluator-last-message.txt"
     verifier_answer, verifier_exit, verifier_raw = run_codex(
         build_verifier_prompt(
-            case, workspace, safe_task_answer, assertions, diagnostics, task_facts, server_facts
+            case,
+            workspace,
+            safe_task_answer,
+            assertions,
+            verification,
+            diagnostics,
+            task_facts,
+            server_facts,
         ),
         workspace, verifier_output, 300,
     )
