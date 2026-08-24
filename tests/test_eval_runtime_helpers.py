@@ -10,6 +10,7 @@ from scripts.eval_runtime_helpers import (
     classify_evaluator_failure,
     collect_web_runtime_diagnostics,
     downgrade_browser_infrastructure_failure,
+    extract_codex_task_runtime_evidence,
     extract_openclaw_command_evidence,
     find_judgment_json,
     redact_sensitive_text,
@@ -21,6 +22,19 @@ from scripts.eval_runtime_helpers import (
 
 
 class EvalRuntimeHelpersTest(unittest.TestCase):
+    def test_codex_runtime_evidence_tracks_clone_and_env_file_change(self):
+        raw = "\n".join(
+            [
+                '{"type":"item.completed","item":{"type":"command_execution","command":"git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs.git","status":"completed","exit_code":0}}',
+                '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"/tmp/agent-quickstart-nextjs/.env.local","kind":"add"}],"status":"completed"}}',
+            ]
+        )
+
+        facts = extract_codex_task_runtime_evidence(raw)
+
+        self.assertTrue(facts["official_quickstart_clone_observed"])
+        self.assertTrue(facts["demo_env_file_written"])
+
     def test_convoai_case_requires_full_browser_verification(self):
         case_path = Path(
             "targets/agora/cases/workflow/convoai-e2e-first-success.yaml"

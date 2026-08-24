@@ -90,6 +90,8 @@ def build_verifier_prompt(
         f"Task process facts: {json.dumps(task_facts)}\n"
         f"Verification-server facts: {json.dumps(server)}\n\n"
         "Verify the workspace before judging:\n"
+        "- Task process facts are runner-derived from the accepted task JSON trace and are authoritative for clone, file-write, dev-command, and GET provenance.\n"
+        "- Run artifacts are stored outside the task workspace; do not search the workspace for accepted-session or final-answer artifacts.\n"
         "- The runner may launch a verification-only server after the task exits; it can prove browser behavior but cannot alone prove the task agent started the server. Use Task process facts for that assertion.\n"
         "- Treat unavailable evidence as blocked rather than inferring pass.\n\n"
         f"Required verification actions:\n{verification}\n\n"

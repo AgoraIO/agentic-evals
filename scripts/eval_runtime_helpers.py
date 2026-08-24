@@ -101,6 +101,8 @@ def redact_sensitive_text(text: str) -> str:
 
 def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
     """Extract bounded runtime facts from a direct Codex JSON event stream."""
+    official_quickstart_clone_observed = False
+    demo_env_file_written = False
     dev_command_observed = False
     successful_get_completed = False
     for line in raw.splitlines():
@@ -109,10 +111,29 @@ def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
         except json.JSONDecodeError:
             continue
         item = record.get("item", {})
+        if item.get("type") == "file_change":
+            changes = item.get("changes", [])
+            demo_env_file_written = demo_env_file_written or (
+                item.get("status") == "completed"
+                and isinstance(changes, list)
+                and any(
+                    isinstance(change, dict)
+                    and str(change.get("path", "")).endswith("/.env.local")
+                    and change.get("kind") in {"add", "update"}
+                    for change in changes
+                )
+            )
+            continue
         if item.get("type") != "command_execution":
             continue
         command = str(item.get("command", "")).lower()
         output = str(item.get("aggregated_output", "")).lower()
+        official_quickstart_clone_observed = official_quickstart_clone_observed or (
+            item.get("status") == "completed"
+            and item.get("exit_code") == 0
+            and "git clone" in command
+            and "github.com/agoraio-conversational-ai/agent-quickstart-nextjs" in command
+        )
         dev_command_observed = dev_command_observed or (
             "npm run dev" in command or "pnpm dev" in command
         )
@@ -123,6 +144,8 @@ def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
             and any(marker in output for marker in ("get_ok", "get succeeded", "get returned"))
         )
     return {
+        "official_quickstart_clone_observed": official_quickstart_clone_observed,
+        "demo_env_file_written": demo_env_file_written,
         "documented_dev_command_observed": dev_command_observed,
         "successful_get_completed": successful_get_completed,
     }
