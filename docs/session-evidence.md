@@ -13,16 +13,18 @@ The evaluator should pick the runtime that is actually available in the current 
 
 Use these sources in priority order:
 
-- accepted fresh-agent child session from the active runtime
-- accepted final answer extracted from the child session
-- runtime-native child-session locator metadata
+- accepted fresh-agent evidence from the active runtime
+- accepted final answer extracted from that evidence
+- runtime-native session or task-process locator metadata
 
 Per runtime:
 
-- Codex:
+- Codex spawned mode:
   - accepted child session under `~/.codex/sessions/`
   - `spawn_agent` success metadata such as nickname or returned id
   - `~/.codex/state_5.sqlite` only to locate and disambiguate child threads
+- Codex direct-process mode:
+  - redacted `codex exec --json` event trace and task final answer stored in the case artifact directory
 - OpenClaw:
   - accepted child session returned by `sessions_history`
   - `sessions_spawn` success metadata such as the returned child session key or label
@@ -30,9 +32,9 @@ Per runtime:
 Do not treat the fresh agent's self-reported `TRACE_FILES_READ` or `TRACE_COMMANDS_EXECUTED` as authoritative evidence.
 They may appear in older child sessions, but they are only low-confidence supporting notes.
 
-## Child Session Location
+## Evidence Location
 
-The evaluator should identify the accepted child session by combining:
+For spawned sessions, the evaluator should identify the accepted child session by combining:
 
 - runtime-native spawn metadata
 - child start time relative to the case attempt
@@ -41,15 +43,17 @@ The evaluator should identify the accepted child session by combining:
 
 Per runtime:
 
-- Codex:
+- Codex spawned mode:
   - `spawn_agent` success metadata such as nickname or returned id when available
   - child session `session_meta.payload.source.subagent.thread_spawn.parent_thread_id`
   - `~/.codex/state_5.sqlite` `thread_spawn_edges` when available
+- Codex direct-process mode:
+  - retain the task process event trace and final answer under that case's artifact directory
 - OpenClaw:
   - the `childSessionKey` returned by `sessions_spawn`
   - returned label or metadata when available
 
-If the evaluator cannot reliably identify a single child session for the case attempt, mark the case `blocked`.
+If spawned-mode evidence cannot be matched to a single child session, or direct-process evidence is missing, mark the case `blocked`.
 
 ## What To Extract From Session Evidence
 
@@ -116,7 +120,7 @@ case-artifacts/<case_id>/
 └── final-answer.txt
 ```
 
-`accepted-session.json` is the accepted child session evidence artifact for the active runtime.
+`accepted-session.json` is the accepted fresh-agent evidence artifact for the active runtime.
 It may be:
 
 - a normalized JSON rendering of Codex session JSONL, or

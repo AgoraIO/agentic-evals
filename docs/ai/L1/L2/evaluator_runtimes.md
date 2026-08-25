@@ -38,6 +38,11 @@ All runners should preserve `pass`/`fail`/`blocked` semantics and case artifact 
 - Main evaluator prompt instructs sub-agent to execute task in workspace
 - Evaluator then independently verifies workspace state
 - Includes server warm-up and verification guidance in prompts for web tasks
+- For the ConvoAI Next.js E2E case, collects a bounded GET probe for `/`,
+  records disabled pnpm build scripts, and copies available agent-created
+  install/dev logs into the artifact directory.
+- Runtime artifacts redact Agora credential values before persistence. HTTP
+  response bodies are measured but not stored.
 
 ## Artifact and Field Normalization
 

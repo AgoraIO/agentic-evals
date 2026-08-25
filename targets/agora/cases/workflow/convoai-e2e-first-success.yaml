@@ -22,15 +22,22 @@ setup:
     - "AGORA_APP_CERTIFICATE"
   env_vars_notes: "The demo may use different env var names (e.g. NEXT_PUBLIC_AGORA_APP_ID). The agent should map from AGORA_APP_ID/AGORA_APP_CERTIFICATE to whatever the demo expects."
 
+verification:
+  - "For browser assertions, use only the installed agent-browser CLI through shell commands, with `--session eval-browser` on every command."
+  - "Open http://localhost:3000, activate Start Conversation, and inspect the resulting page state."
+  - "Inspect agent-browser network requests for /api/invite-agent; do not infer invite success from the landing-page GET alone."
+  - "Treat the invite flow as successful only when its observed response has status 200 and state `RUNNING`."
+  - "If agent-browser infrastructure is unavailable, report blocked(environment) rather than failing the demo."
+
 assert:
   summary: "The agent should clone the official quickstart, configure credentials, start the dev server, and report a working local URL."
   required:
     - description: "The official Next.js quickstart repo is cloned."
       pass_criteria:
-        - "Session evidence shows a git clone command targeting `agent-quickstart-nextjs` or the GitHub URL `https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`."
+        - "Session evidence shows either a git clone command targeting `agent-quickstart-nextjs` / `https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs`, or an Agora CLI `quickstart create` / `init` command using the `nextjs` template."
         - "A directory exists in the workspace containing the quickstart files (package.json with agora dependencies, app/api/invite-agent/, etc.) regardless of the directory name."
       fail_signals:
-        - "No clone command observed — agent generates code from scratch."
+        - "No approved direct-clone or Agora CLI quickstart command observed — agent generates code from scratch."
         - "Agent clones a different repo that is not the official quickstart."
       evidence_scope:
         - "accepted-session.jsonl"
@@ -39,10 +46,10 @@ assert:
     - description: "Agora credentials are configured in the demo's env file."
       pass_criteria:
         - "Session evidence shows the agent writing a .env or .env.local file with non-empty Agora App ID and App Certificate values."
-        - "The env file exists somewhere in the workspace (search recursively for .env.local or .env) and contains NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE with non-placeholder values."
+        - "The env file exists somewhere in the workspace (search recursively for .env.local or .env) and contains non-empty literal NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE values."
       fail_signals:
         - "No env file is written anywhere in the workspace."
-        - "Env file contains empty or placeholder values (e.g. your_agora_app_id)."
+        - "Env file contains an empty value, an explicit placeholder (e.g. your_agora_app_id), or an unexpanded shell variable."
       evidence_scope:
         - "accepted-session.jsonl"
         - "workspace-files"
@@ -61,14 +68,18 @@ assert:
 
     - description: "The demo page loads successfully in a browser."
       pass_criteria:
+        - "A real GET request to the reported URL returns a successful status with a non-empty response body; HEAD-only success or a listening socket is insufficient."
         - "The evaluator opens the reported URL and the page loads without errors."
         - "If the flow exposes a Start Conversation/Invite action, successful navigation into that action is observed (partial page load alone is not enough for a full-success claim)."
       fail_signals:
+        - "GET / times out, returns an error, or returns an empty response body."
+        - "Required dependency build scripts are explicitly disabled to bypass installation."
         - "The page fails to load or returns an HTTP error."
         - "The browser console shows critical JavaScript errors."
         - "The page is reachable but the evaluator does not reach the conversation start/invite flow."
       evidence_scope:
         - "evaluator-verification"
+        - "runtime-diagnostics.json"
 
   forbidden: []
 

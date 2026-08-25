@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Two-phase OpenClaw evaluation via acpx: task agent + evaluator agent."""
-import json, subprocess, os, datetime, re, sys, time
+import json, subprocess, os, datetime, sys, time
 from pathlib import Path
-from json import JSONDecoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
+    classify_evaluator_failure,
+    collect_web_runtime_diagnostics,
     create_case_workspace,
     e2e_task_requirements,
+    extract_openclaw_command_evidence,
+    find_judgment_json,
+    quickstart_env_status,
+    redact_sensitive_text,
     seed_agora_credentials,
+    verification_instructions,
 )
+from openclaw_acpx import AcpxClient, AcpxCommandError
 
 # Force unbuffered output so prints appear in CI logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -35,6 +42,7 @@ print(f"Cases: {len(cases)}", flush=True)
 
 repo_root = Path.cwd()
 print(f"repo_root: {repo_root}", flush=True)
+TASK_TIMEOUT_SECONDS = 900
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -42,22 +50,13 @@ def now():
 def run_openclaw(prompt, timeout=600, label="agent", cwd=None):
     """Run a prompt via acpx openclaw with persistent session for full tool access."""
     print(f"  [{label}] Creating new session and sending prompt...")
-    
-    # Step 1: Ensure a session exists
-    subprocess.run(
-        ["acpx", "--approve-all", "openclaw", "sessions", "ensure"],
-        capture_output=True, text=True, timeout=30
-    )
-    
-    # Step 2: Send prompt to the session (not exec)
-    cmd = ["acpx", "--approve-all", "--format", "json", "openclaw", "prompt", prompt]
+    client = AcpxClient(cwd or Path.cwd())
     try:
-        result = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=None,
-            text=True, timeout=timeout, cwd=cwd,
-            env={**os.environ}
-        )
-        return result.stdout, result.returncode
+        client.ensure_session()
+        return client.prompt(prompt, timeout=timeout)
+    except AcpxCommandError as error:
+        print(f"  [{label}] {error}", file=sys.stderr, flush=True)
+        return json.dumps({"error": str(error)}), error.returncode
     except subprocess.TimeoutExpired:
         print(f"  [{label}] TIMEOUT after {timeout}s")
         return json.dumps({"error": f"TIMEOUT after {timeout}s"}), -1
@@ -130,59 +129,10 @@ def extract_response_text(raw_json):
             continue
     return "".join(text_parts)
 
-def extract_tool_calls(raw_json):
-    """Extract tool call info from acpx NDJSON output."""
-    tools = []
-    for line in raw_json.strip().split("\n"):
-        if not line.strip():
-            continue
-        try:
-            msg = json.loads(line)
-            params = msg.get("params", {})
-            update = params.get("update", {})
-            su = update.get("sessionUpdate", "")
-            # OpenClaw uses various tool-related session updates
-            if su in ("tool_call_start", "tool_call", "tool_use_start",
-                       "tool_use", "tool_result", "tool_output"):
-                tools.append({"type": su, "data": update})
-        except:
-            continue
-    return tools
-
 def count_ndjson_events(raw_json):
     """Count total NDJSON lines for diagnostics."""
     return sum(1 for line in raw_json.strip().split("\n") if line.strip())
 
-
-def strip_ansi(text):
-    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
-
-
-def find_judgment_json(text):
-    cleaned = strip_ansi(text).strip()
-    if not cleaned:
-        return None
-
-    fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
-    for block in reversed(fence_matches):
-        try:
-            parsed = json.loads(block)
-            if isinstance(parsed, dict) and ("status" in parsed or "assertions" in parsed):
-                return parsed
-        except Exception:
-            pass
-
-    decoder = JSONDecoder()
-    for i, ch in enumerate(cleaned):
-        if ch != "{":
-            continue
-        try:
-            obj, _ = decoder.raw_decode(cleaned[i:])
-            if isinstance(obj, dict) and ("status" in obj or "assertions" in obj):
-                return obj
-        except Exception:
-            continue
-    return None
 
 for case in cases:
     cid = case["case_id"]
@@ -205,16 +155,11 @@ for case in cases:
 
     # --- Phase 1: Task Agent ---
     # Reset session for clean state and enable elevated mode
-    subprocess.run(
-        ["acpx", "--approve-all", "openclaw", "sessions", "new"],
-        capture_output=True, text=True, timeout=30
-    )
+    task_client = AcpxClient(attempt_ws)
+    task_client.new_session()
     time.sleep(3)
     # Enable auto-approve for shell commands
-    subprocess.run(
-        ["acpx", "--approve-all", "openclaw", "prompt", "/elevated full"],
-        capture_output=True, text=True, timeout=30
-    )
+    task_client.set_elevated()
     time.sleep(2)
     print("  Elevated mode set to full (auto-approve)", flush=True)
 
@@ -236,7 +181,9 @@ for case in cases:
         f"- Give the exact answer you would send to the user."
     )
 
-    task_raw, task_exit = run_openclaw(task_prompt, timeout=600, label="task", cwd=attempt_ws)
+    task_raw, task_exit = run_openclaw(
+        task_prompt, timeout=TASK_TIMEOUT_SECONDS, label="task", cwd=attempt_ws
+    )
 
     # Retry up to 2 more times if the agent times out or produces no output
     MAX_RETRIES = 3
@@ -248,18 +195,12 @@ for case in cases:
             break
         print(f"  [task] Attempt {attempt - 1} failed (timeout={is_timeout}, empty={is_empty}). Retrying ({attempt}/{MAX_RETRIES})...", flush=True)
         # Reset session for clean state
-        subprocess.run(
-            ["acpx", "--approve-all", "openclaw", "sessions", "new"],
-            capture_output=True, text=True, timeout=30
-        )
+        task_client.new_session()
         time.sleep(3)
-        subprocess.run(
-            ["acpx", "--approve-all", "openclaw", "prompt", "/elevated full"],
-            capture_output=True, text=True, timeout=30
-        )
+        task_client.set_elevated()
         time.sleep(2)
         task_raw, task_exit = run_openclaw(
-            task_prompt, timeout=600, label=f"task-retry{attempt}", cwd=attempt_ws
+            task_prompt, timeout=TASK_TIMEOUT_SECONDS, label=f"task-retry{attempt}", cwd=attempt_ws
         )
 
     t1_end = now()
@@ -270,27 +211,35 @@ for case in cases:
 
     art_dir = run_dir / "case-artifacts" / cid
     art_dir.mkdir(parents=True, exist_ok=True)
-    (art_dir / "task-agent-raw.json").write_text(task_raw)
+    safe_task_raw = redact_sensitive_text(task_raw)
+    (art_dir / "task-agent-raw.json").write_text(safe_task_raw)
 
-    task_response = extract_response_text(task_raw)
-    task_tools = extract_tool_calls(task_raw)
+    task_response = redact_sensitive_text(extract_response_text(task_raw))
+    command_evidence = extract_openclaw_command_evidence(task_raw)
+    safe_command_evidence = [
+        redact_sensitive_text(command) for command in command_evidence
+    ]
     print(f"Phase 1 response (first 500):\n{task_response[:500]}")
-    print(f"Phase 1 tool calls: {len(task_tools)}")
     (art_dir / "final-answer.txt").write_text(task_response + "\n")
 
     # Workspace state
     ws_files = subprocess.run(
         ["find", attempt_ws, "-type", "f", "-maxdepth", "4"],
         capture_output=True, text=True).stdout
-    ws_files_short = ws_files[:2000]  # Limit for evaluator prompt
+    credential_status = quickstart_env_status(attempt_ws)
+    runtime_diagnostics, _ = collect_web_runtime_diagnostics(attempt_ws)
+    (art_dir / "runtime-diagnostics.json").write_text(
+        json.dumps(runtime_diagnostics, indent=2) + "\n"
+    )
     print(f"Workspace files ({ws_files.count(chr(10))} files):\n{ws_files[:500]}")
 
-    # --- Phase 2: Evaluator Agent (using Gemini CLI for reliable text judgment) ---
+    # --- Phase 2: Evaluator Agent (Codex) ---
     t2_start = now()
     print(f"\n--- Phase 2: Evaluator ({t2_start.isoformat()}) ---")
 
     case_data = yaml.safe_load(open(case["path"]))
     assertions_text = json.dumps(case_data.get("assert", {}).get("required", []), indent=2)
+    verification_text = verification_instructions(case_data)
 
     # Keep evaluator prompt concise and action-oriented so OpenClaw engages
     eval_prompt = (
@@ -299,21 +248,19 @@ for case in cases:
         f"The agent responded:\n{task_response[:1500]}\n\n"
         f"The agent's workspace is at: {attempt_ws}\n"
         f"Files in workspace: {ws_files.count(chr(10))}\n\n"
-        f"IMPORTANT: The ACP protocol does not record tool calls, so you MUST verify by inspecting the workspace directly:\n"
-        f"- Search for the official quickstart clone: find {attempt_ws} -maxdepth 3 -type d -name 'agent-quickstart-nextjs'\n"
-        f"- Also accept nested clones from tarballs: find {attempt_ws} -maxdepth 5 -type d \\( -name 'agent-quickstart-nextjs' -o -name 'agent-quickstart-*' \\)\n"
-        f"- In that quickstart directory, verify project files exist: package.json, app/api/invite-agent/, and components/.\n"
-        f"- Search for .env.local files recursively: find {attempt_ws} -name '.env.local'\n"
-        f"- If an .env.local exists, verify it contains non-empty NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE values.\n"
-        f"- Check if a dev server process is running: ss -ltnp | grep 3000 or curl http://localhost:3000\n"
-        f"- Confirm clone provenance: only command evidence from `git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs` "
-        "or official tarball source is acceptable for this case.\n"
+        f"Runner credential-wiring facts (values are deliberately unavailable): {json.dumps(credential_status)}\n\n"
+        f"Runner runtime facts: {json.dumps(runtime_diagnostics)}\n\n"
+        f"Completed shell commands recorded by the ACP session:\n{chr(10).join(safe_command_evidence)[:10_000]}\n\n"
+        f"IMPORTANT: Verify the workspace directly in addition to the recorded command evidence:\n"
+        f"- Treat the runner credential-wiring facts as authoritative for the env-file assertion. Do not infer a placeholder from value length or format.\n"
+        f"- Only attribute an invalid App ID or Certificate to credentials when an observed token/invite API response explicitly reports an authentication or project-configuration error.\n"
         f"- Do NOT count `.agora-ci-credentials.env` as proof of demo env wiring.\n"
         f"- Run these checks yourself before judging.\n\n"
+        f"Required verification actions:\n{verification_text}\n\n"
         f"Check these assertions and tell me pass or fail for each:\n{assertions_text}\n\n"
         f"Write your answer as a JSON object with this structure:\n"
-        '{"case_id":"' + cid + '","status":"pass or fail",'
-        '"assertions":[{"summary":"description","status":"pass or fail","evidence":["what you observed"]}],'
+        '{"case_id":"' + cid + '","status":"pass, fail, or blocked",'
+        '"assertions":[{"summary":"description","status":"pass, fail, or blocked","evidence":["what you observed"]}],'
         '"notes":["any observations"]}\n\n'
         "Please run the verification commands and write the JSON now."
     )
@@ -322,10 +269,10 @@ for case in cases:
     t2_end = now()
     t2_dur = (t2_end - t2_start).total_seconds()
 
-    eval_events = 1  # Codex returns single response
     print(f"Phase 2 completed in {t2_dur:.0f}s (exit={eval_exit})")
 
-    (art_dir / "evaluator-raw.txt").write_text(eval_response)
+    safe_eval_response = redact_sensitive_text(eval_response)
+    (art_dir / "evaluator-raw.txt").write_text(safe_eval_response)
 
     print(f"Phase 2 response (first 800):\n{eval_response[:800]}")
 
@@ -335,12 +282,13 @@ for case in cases:
         print(eval_response[:1000])
 
     # Parse judgment
+    blocked_reason, failure_note = classify_evaluator_failure(eval_exit, safe_eval_response)
     case_result = {
         "case_id": cid,
         "status": "blocked",
-        "blocked_reason": "evaluator-parse-error",
+        "blocked_reason": blocked_reason,
         "assertions": [],
-        "notes": ["Could not parse evaluator response"],
+        "notes": [failure_note],
         "task_started_at": t1_start.isoformat(),
         "task_completed_at": t1_end.isoformat(),
         "task_duration_s": round(t1_dur),
@@ -351,7 +299,7 @@ for case in cases:
         "workspace_root": attempt_ws,
     }
 
-    parsed = find_judgment_json(eval_response)
+    parsed = find_judgment_json(safe_eval_response) if eval_exit == 0 else None
     if parsed:
         status = str(parsed.get("status", "blocked")).strip().lower()
         case_result.update({
@@ -368,8 +316,9 @@ for case in cases:
 
     # Evidence
     evidence = {
-        "task_agent_output": task_raw[:50000],
-        "evaluator_output": eval_response[:50000],
+        "task_agent_output": safe_task_raw[:50000],
+        "evaluator_output": safe_eval_response[:50000],
+        "completed_commands": safe_command_evidence,
         "workspace_files": ws_files,
     }
     (art_dir / "accepted-session.json").write_text(

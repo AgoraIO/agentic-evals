@@ -49,9 +49,9 @@ Every evaluator that uses this repo should follow this order:
 8. If `run_mode` is `ab-urls`, prepare 2 variant source workspaces before any case execution.
 9. Create a parent temp directory for isolated per-case workspaces.
 10. Execute each case in its own fresh isolated workspace.
-11. Locate the accepted fresh-agent child session for each case.
-12. Save the accepted child session for each case.
-13. Render a readable `transcript.md` from the accepted child sessions.
+11. Locate the accepted fresh-agent evidence for each case.
+12. Save the accepted evidence for each case.
+13. Render a readable `transcript.md` from the accepted evidence.
 14. Write one `case-results/<case_id>.json` file per case.
 15. Write `report.md`.
 16. If `run_mode` is `ab-urls`, join the 2 variant result sets by `case_id`, then write `comparison.json` and the top-level comparison `report.md`.
@@ -127,6 +127,7 @@ runs/<run_id>/
 - `case_workspace_root` for the parent temp directory used for per-case workspaces
 - `evidence_mode` with one of:
   - `codex-local-session-store`
+  - `codex-direct-process`
   - `openclaw-session-history`
 - `notes` if the environment is unusual
 
@@ -222,9 +223,9 @@ Only use statuses allowed by `targets/<target_id>/target.yaml`.
 
 Preferred evidence:
 
-- the accepted fresh-agent child session captured from the active runtime
-- the accepted final answer extracted from that child session
-- runtime-native child-session locator metadata
+- the accepted fresh-agent evidence captured from the active runtime
+- the accepted final answer extracted from that evidence
+- runtime-native session or task-process locator metadata
 
 Supported runtime patterns:
 
@@ -232,12 +233,13 @@ Supported runtime patterns:
   - spawn with `spawn_agent`
   - locate evidence from `~/.codex/sessions/`
   - use `~/.codex/state_5.sqlite` only as a locator or tie-breaker when needed
+  - direct-process mode may run one fresh `codex exec --json` task process per isolated case; its redacted event trace and final answer are accepted evidence
 - OpenClaw mode:
   - spawn with `sessions_spawn`
   - retrieve evidence from `sessions_history`
   - use returned child session keys or labels as the primary locator
 
-The accepted child session JSON is the authoritative evidence source for the current framework.
+The accepted fresh-agent evidence is the authoritative evidence source for the current framework.
 `transcript.md` is a derived human-readable view of that accepted session evidence.
 Do not mark a case `pass` from a generic assistant claim such as "I checked the skill" unless the accepted session evidence shows what was actually read or run.
 
@@ -250,7 +252,7 @@ Static reads by the evaluator are allowed for:
 
 Static reads by the evaluator are not enough on their own to mark a dynamic case `pass` when a fresh-agent run was available.
 
-If the runtime evidence source is unavailable, if the accepted child session cannot be retrieved, or if the session evidence is too coarse to support the assertion, do not judge the case as `pass`.
+If the runtime evidence source is unavailable, if the accepted fresh-agent evidence cannot be retrieved, or if the evidence is too coarse to support the assertion, do not judge the case as `pass`.
 Mark the case `blocked` with:
 
 - `environment` when the runtime evidence source is unavailable
