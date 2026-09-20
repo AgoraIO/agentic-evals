@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -17,6 +18,7 @@ from scripts.eval_runtime_helpers import (
     redact_sensitive_text,
     e2e_task_requirements,
     quickstart_env_status,
+    snapshot_quickstart_env_files,
     start_nextjs_verification_server,
     verification_instructions,
 )
@@ -42,6 +44,69 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
         facts = extract_codex_task_runtime_evidence(raw)
 
         self.assertTrue(facts["official_quickstart_clone_observed"])
+
+    def test_env_provenance_tracks_shell_writes_without_file_change_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
+            before = snapshot_quickstart_env_files(workspace)
+            # Exercise the real shell-write pattern from PR 56 with dummy values.
+            subprocess.run(
+                ["sh", "-c", "printf 'NEXT_PUBLIC_AGORA_APP_ID=test-id\\nNEXT_AGORA_APP_CERTIFICATE=test-cert\\n' > .env.local"],
+                cwd=workspace, check=True,
+            )
+            after = snapshot_quickstart_env_files(workspace)
+            facts = extract_codex_task_runtime_evidence("", before, after)
+            self.assertTrue(facts["demo_env_file_written"])
+            self.assertNotIn("test-cert", json.dumps(after))
+
+    def test_env_provenance_rejects_preexisting_unchanged_or_invalid_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
+            env_file = workspace / ".env.local"
+            env_file.write_text("NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=test-cert\n")
+            before = snapshot_quickstart_env_files(workspace)
+            raw = json.dumps({"type": "item.completed", "item": {
+                "type": "file_change", "status": "completed", "changes": [
+                    {"path": str(env_file), "kind": "update"}]}})
+            self.assertFalse(extract_codex_task_runtime_evidence(
+                raw, before, snapshot_quickstart_env_files(workspace))["demo_env_file_written"])
+            for content in [
+                "NEXT_PUBLIC_AGORA_APP_ID=test-id\n",
+                "NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=${AGORA_APP_CERTIFICATE}\n",
+            ]:
+                env_file.write_text(content)
+                self.assertFalse(extract_codex_task_runtime_evidence(
+                    raw, before, snapshot_quickstart_env_files(workspace))["demo_env_file_written"])
+            env_file.write_text("NEXT_PUBLIC_AGORA_APP_ID=new-id\nNEXT_AGORA_APP_CERTIFICATE=new-cert\n")
+            self.assertTrue(extract_codex_task_runtime_evidence(
+                "", before, snapshot_quickstart_env_files(workspace))["demo_env_file_written"])
+
+    def test_env_snapshot_does_not_accept_unrelated_env_or_shadowed_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / ".env").write_text("NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=test-cert\n")
+            self.assertEqual(snapshot_quickstart_env_files(workspace), {})
+            (workspace / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
+            (workspace / ".env.local").write_text("NEXT_PUBLIC_AGORA_APP_ID=\n")
+            after = snapshot_quickstart_env_files(workspace)
+            self.assertFalse(extract_codex_task_runtime_evidence("", {}, after)["demo_env_file_written"])
+
+    def test_env_snapshot_excludes_symlinks_and_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
+            outside = root / ".env.local"
+            outside.write_text("NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=test-cert\n")
+            (workspace / ".env.local").symlink_to(outside)
+            modules = workspace / "node_modules"
+            modules.mkdir()
+            (modules / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
+            (modules / ".env.local").write_text(outside.read_text())
+            self.assertEqual(snapshot_quickstart_env_files(workspace), {})
 
     def test_convoai_case_requires_full_browser_verification(self):
         case_path = Path(

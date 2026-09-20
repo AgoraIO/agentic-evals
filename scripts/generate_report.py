@@ -51,8 +51,12 @@ lines += ["", "## Assertion Details", ""]
 for c in cases:
     lines.append(f"### {c['case_id']} — {c['status']}")
     for a in c.get("assertions", []):
-        lines.append(f"- [{a.get('status','?')}] {a.get('summary','')}")
-        for e in a.get("evidence", [])[:2]:
+        summary = a.get("summary") or a.get("description") or "Unnamed assertion"
+        lines.append(f"- [{a.get('status','?')}] {summary}")
+        evidence = a.get("evidence") or a.get("notes") or []
+        if isinstance(evidence, str):
+            evidence = [evidence]
+        for e in evidence[:2]:
             lines.append(f"  - {e}")
     notes = c.get("notes", [])
     if isinstance(notes, str):

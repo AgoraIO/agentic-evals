@@ -18,6 +18,18 @@ The repository supports multiple runtime-specific runners while enforcing a comm
 
 All runners should preserve `pass`/`fail`/`blocked` semantics and case artifact outputs.
 
+## Direct Task Runner Evidence
+
+- Credential-write provenance uses in-memory snapshots taken immediately before
+  and after the task process, before starting verification. New or changed env
+  files in the detected quickstart must contain both required non-placeholder
+  Agora keys; `.env.local` takes precedence over `.env`. This covers CLI,
+  shell, and editor writes without trusting command text or pre-existing files.
+- Snapshots exclude dependency directories and symlinks. Credential values and
+  fingerprints are never persisted; artifacts contain only the resulting facts.
+- Reports accept both `summary`/`evidence` and `description`/`notes` assertion
+  fields, preserving explanations without changing pass/fail/blocked results.
+
 ## OpenClaw Runner Notes
 
 - Uses `acpx openclaw` for task execution
@@ -33,6 +45,16 @@ All runners should preserve `pass`/`fail`/`blocked` semantics and case artifact 
 - Falls back to `blocked` on parse failure
 
 ## Hermes Runner Notes
+
+- The task stderr's exact `session_id` selects a redacted JSONL session export.
+  Tool calls and results are saved in `task-session.json` before verification;
+  the verifier reads this file and correlates call IDs with successful results.
+  Missing, ambiguous, or mismatched sessions remain unavailable; the runner
+  never falls back to the latest session. Timeout output is preserved for lookup.
+- Invite verification uses `network requests --json`, then
+  `network request <request-id> --json` for the POST made by the browser click.
+  Plain output may contain only the URL; no extra POST is sent for proof.
+
 
 - Supports evaluator+subagent orchestration
 - Main evaluator prompt instructs sub-agent to execute task in workspace

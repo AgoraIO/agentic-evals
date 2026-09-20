@@ -2,6 +2,7 @@
 """Shared helpers for two-phase eval runtime scripts."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -99,7 +100,11 @@ def redact_sensitive_text(text: str) -> str:
     return redacted
 
 
-def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
+def extract_codex_task_runtime_evidence(
+    raw: str,
+    env_before: dict[str, dict[str, object]] | None = None,
+    env_after: dict[str, dict[str, object]] | None = None,
+) -> dict[str, bool]:
     """Extract bounded runtime facts from a direct Codex JSON event stream."""
     official_quickstart_clone_observed = False
     demo_env_file_written = False
@@ -151,6 +156,14 @@ def extract_codex_task_runtime_evidence(raw: str) -> dict[str, bool]:
             and "curl" in command
             and any(marker in output for marker in ("get_ok", "get succeeded", "get returned"))
         )
+    # Snapshots bracket only the task process, before any verifier can write.
+    # Unlike command matching, this covers CLI, shell, and editor writes while
+    # rejecting pre-existing files and unsuccessful/no-op writes.
+    if env_before is not None and env_after is not None:
+        demo_env_file_written = any(
+            state["valid"] and state["digest"] != env_before.get(path, {}).get("digest")
+            for path, state in env_after.items()
+        )
     return {
         "official_quickstart_clone_observed": official_quickstart_clone_observed,
         "demo_env_file_written": demo_env_file_written,
@@ -175,8 +188,12 @@ def quickstart_env_status(workspace: str | Path) -> dict[str, object]:
             "contains_known_placeholder": False,
         }
 
+    return _quickstart_env_content_status(candidates[0].read_text(errors="replace"))
+
+
+def _quickstart_env_content_status(text: str) -> dict[str, object]:
     values: dict[str, str] = {}
-    for line in candidates[0].read_text(errors="replace").splitlines():
+    for line in text.splitlines():
         if "=" not in line or line.lstrip().startswith("#"):
             continue
         key, value = line.split("=", 1)
@@ -202,6 +219,38 @@ def quickstart_env_status(workspace: str | Path) -> dict[str, object]:
             for value in required_values
         ),
     }
+
+
+
+def snapshot_quickstart_env_files(workspace: str | Path) -> dict[str, dict[str, object]]:
+    """In-memory fingerprints only; never persist values or fingerprints to artifacts."""
+    workspace = Path(workspace).resolve()
+    snapshot = {}
+    for directory, dirs, files in os.walk(workspace, followlinks=False):
+        dirs[:] = [name for name in dirs if name not in {"node_modules", ".git"}
+                   and not (Path(directory) / name).is_symlink()]
+        try:
+            package = json.loads((Path(directory) / "package.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(package, dict) or package.get("name") != "convoai-quickstart-web-nextjs":
+            continue
+        # Match the effective env file: .env.local takes precedence over .env.
+        names = [".env.local"] if ".env.local" in files else [".env"]
+        for name in names:
+            path = Path(directory) / name
+            if name not in files or path.is_symlink():
+                continue
+            try:
+                content = path.read_bytes()
+            except OSError:
+                continue
+            status = _quickstart_env_content_status(content.decode(errors="replace"))
+            snapshot[str(path.relative_to(workspace))] = {
+                "digest": hashlib.sha256(content).hexdigest(),
+                "valid": status["required_keys_non_empty"] and not status["contains_known_placeholder"],
+            }
+    return snapshot
 
 
 def find_judgment_json(text: str) -> dict[str, object] | None:
@@ -243,6 +292,72 @@ def verification_instructions(case_data: dict[str, object]) -> str:
     if not isinstance(steps, list):
         return ""
     return "\n".join(f"- {step}" for step in steps if isinstance(step, str))
+
+
+def collect_hermes_session_evidence(stderr: str) -> dict[str, object]:
+    """Export only the task's explicit session; never fall back to latest/history."""
+    ids = set(re.findall(r"(?m)^session_id:\s*([A-Za-z0-9_.-]+)\s*$", stderr))
+    evidence: dict[str, object] = {
+        "session_id": None, "status": "unavailable", "tool_messages": [],
+        "reason": "Task did not emit exactly one session ID.",
+    }
+    if len(ids) != 1:
+        return evidence
+    session_id = ids.pop()
+    evidence["session_id"] = session_id
+    try:
+        result = subprocess.run(
+            ["hermes", "sessions", "export", "-", "--session-id", session_id,
+             "--format", "jsonl", "--redact"],
+            capture_output=True, text=True, timeout=30, env=hermes_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        evidence["reason"] = "Session export could not complete."
+        return evidence
+    if result.returncode != 0:
+        evidence["reason"] = f"Session export exited with code {result.returncode}."
+        return evidence
+    try:
+        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        rows = []
+    if len(rows) != 1 or not isinstance(rows[0], dict) or rows[0].get("id") != session_id:
+        evidence["reason"] = "Export did not contain exactly the requested session."
+        return evidence
+    messages = rows[0].get("messages")
+    if not isinstance(messages, list):
+        evidence["reason"] = "Session export has no message list."
+        return evidence
+
+    def redact(value):
+        # Redact string values before serialization so JSON structure stays intact.
+        if isinstance(value, str):
+            return redact_sensitive_text(value)
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        return value
+
+    tool_messages = []
+    calls, results = set(), set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant" and isinstance(message.get("tool_calls"), list):
+            tool_messages.append(redact({"role": "assistant", "tool_calls": message["tool_calls"]}))
+            calls.update(call["id"] for call in message["tool_calls"]
+                         if isinstance(call, dict) and isinstance(call.get("id"), str))
+        elif message.get("role") == "tool" and isinstance(message.get("tool_call_id"), str):
+            results.add(message["tool_call_id"])
+            tool_messages.append(redact({key: message[key] for key in
+                ("role", "tool_call_id", "tool_name", "content") if key in message}))
+    evidence["tool_messages"] = tool_messages
+    if not calls.intersection(results):
+        evidence["reason"] = "No matching tool call and result in the session export."
+        return evidence
+    evidence.update(status="available", reason=None)
+    return evidence
 
 
 def extract_openclaw_command_evidence(raw_json: str) -> list[str]:

@@ -22,6 +22,7 @@ from eval_runtime_helpers import (
     find_judgment_json,
     redact_sensitive_text,
     seed_agora_credentials,
+    snapshot_quickstart_env_files,
     start_nextjs_verification_server,
     stop_verification_server,
     verification_instructions,
@@ -90,7 +91,7 @@ def build_verifier_prompt(
         f"Task process facts: {json.dumps(task_facts)}\n"
         f"Verification-server facts: {json.dumps(server)}\n\n"
         "Verify the workspace before judging:\n"
-        "- Task process facts are runner-derived from the accepted task JSON trace and are authoritative for clone, file-write, dev-command, and GET provenance.\n"
+        "- Task process facts are runner-derived from the accepted task JSON trace and task-only before/after env snapshots. They are authoritative for clone, file-write, dev-command, and GET provenance.\n"
         "- Run artifacts are stored outside the task workspace; do not search the workspace for accepted-session or final-answer artifacts.\n"
         "- The runner may launch a verification-only server after the task exits; it can prove browser behavior but cannot alone prove the task agent started the server. Use Task process facts for that assertion.\n"
         "- Treat unavailable evidence as blocked rather than inferring pass.\n\n"
@@ -111,6 +112,7 @@ for case in CASES:
     artifact_dir = RUN_DIR / "case-artifacts" / case_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
+    env_before = snapshot_quickstart_env_files(workspace)
     task_started = now()
     task_answer_path = artifact_dir / "final-answer.txt"
     task_answer, task_exit, task_raw = run_codex(
@@ -119,7 +121,9 @@ for case in CASES:
     task_completed = now()
     safe_task_answer = redact_sensitive_text(task_answer)
     safe_task_raw = redact_sensitive_text(task_raw)
-    task_facts = extract_codex_task_runtime_evidence(safe_task_raw)
+    task_facts = extract_codex_task_runtime_evidence(
+        safe_task_raw, env_before, snapshot_quickstart_env_files(workspace)
+    )
     task_answer_path.write_text(safe_task_answer + "\n")
     (artifact_dir / "task-agent-raw.jsonl").write_text(safe_task_raw)
     (artifact_dir / "task-agent-diagnostics.json").write_text(json.dumps({
