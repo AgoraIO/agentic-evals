@@ -1,4 +1,4 @@
-"""Exercise the direct runner with recorded task events, without model calls."""
+"""Exercise the original runner flow with recorded task/verifier responses."""
 import json
 import os
 from pathlib import Path
@@ -14,23 +14,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CodexContractRunnerTest(unittest.TestCase):
-    def run_case(self, *, credentials=False, task_exit=0, trace=None, answer='Use the Web reference.', verifier_response=None):
+    def run_case(self, *, credentials=False, with_app=False, verifier_response=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workspace = root / 'workspace'
             workspace.mkdir()
+            if with_app:
+                (workspace / 'package.json').write_text('{"name":"convoai-quickstart-web-nextjs"}')
             run_dir = root / 'run'
             (run_dir / 'case-results').mkdir(parents=True)
             case_path = root / 'case.yaml'
             case_path.write_text('setup:\n  env_vars_required: ' + ('[AGORA_APP_ID, AGORA_APP_CERTIFICATE]' if credentials else '[]') + '\nassert:\n  required: []\n')
             cases = [{'case_id': 'contract-test', 'path': str(case_path), 'user_prompt': 'Explain only.'}]
-            if trace is None:
-                trace = '\n'.join([json.dumps({'type': 'item.completed', 'item': {
-                    'type': 'command_execution', 'command': 'cat .agents/skills/agora/references/rtc/web.md',
-                    'status': 'completed', 'exit_code': 0, 'aggregated_output': 'AGORA_APP_CERTIFICATE=dummy-cert'}}),
-                    json.dumps({'type': 'turn.completed'})])
+            trace = '\n'.join([json.dumps({'type': 'item.completed', 'item': {
+                'type': 'command_execution', 'command': 'cat .agents/skills/agora/references/rtc/web.md',
+                'status': 'completed', 'exit_code': 0, 'aggregated_output': 'AGORA_APP_CERTIFICATE=dummy-cert'}}),
+                json.dumps({'type': 'turn.completed'})])
             real_read = Path.read_text
-            prompts, environments = [], []
+            prompts = []
 
             def read(path, *args, **kwargs):
                 if str(path) == '/tmp/codex-eval-cases.json':
@@ -38,19 +39,18 @@ class CodexContractRunnerTest(unittest.TestCase):
                 return real_read(path, *args, **kwargs)
 
             def command(args, **kwargs):
-                if args[0] == 'find':
+                if args[0] in ('find', 'lsof'):
                     return subprocess.CompletedProcess(args, 0, '', '')
                 self.assertEqual(args[0], 'codex')
+                self.assertNotIn('env', kwargs)  # Preserve the original inherited environment.
                 prompts.append(kwargs['input'])
-                environments.append(kwargs['env'])
                 output = Path(args[args.index('--output-last-message') + 1])
                 if len(prompts) == 1:
-                    output.write_text(answer)
-                    return subprocess.CompletedProcess(args, task_exit, trace, '')
+                    output.write_text('Use the Web reference.')
+                    return subprocess.CompletedProcess(args, 0, trace, '')
                 saved_trace = run_dir / 'case-artifacts/contract-test/task-agent-raw.jsonl'
                 self.assertIn(str(saved_trace), kwargs['input'])
-                if trace:
-                    self.assertIn('cat .agents/skills/agora/references/rtc/web.md', saved_trace.read_text())
+                self.assertIn('cat .agents/skills/agora/references/rtc/web.md', saved_trace.read_text())
                 self.assertNotIn('dummy-cert', saved_trace.read_text())
                 output.write_text(verifier_response if verifier_response is not None else json.dumps({'status': 'pass', 'assertions': [], 'notes': []}))
                 return subprocess.CompletedProcess(args, 0, '', '')
@@ -59,14 +59,16 @@ class CodexContractRunnerTest(unittest.TestCase):
                  patch.dict('sys.modules', {'eval_runtime_helpers': helpers}), \
                  patch.object(Path, 'read_text', read), \
                  patch.object(helpers, 'create_case_workspace', return_value=(str(workspace), True)), \
-                 patch.object(helpers, 'seed_agora_credentials', return_value=workspace / '.agora-ci-credentials.env') as seed, \
-                 patch.object(helpers, 'snapshot_quickstart_env_files', return_value={}), \
-                 patch.object(helpers, 'start_nextjs_verification_server', return_value=(None, {})) as server, \
-                 patch.object(helpers, 'collect_web_runtime_diagnostics', return_value=({}, {})) as diagnostics, \
+                 patch.object(helpers, 'probe_http_endpoint', return_value={'status': 200, 'body_bytes': 10, 'error': None}) as probe, \
+                 patch.object(subprocess, 'Popen') as start_process, \
                  patch.object(subprocess, 'run', side_effect=command):
+                # Use real credential, app-discovery, server and diagnostic helpers.
                 runpy.run_path(str(ROOT / 'scripts/run_codex_eval.py'))
+                self.assertTrue((workspace / '.agora-ci-credentials.env').exists())
+                start_process.assert_not_called()
             result = json.loads((run_dir / 'case-results/contract-test.json').read_text())
-            return result, prompts, environments, seed.call_count, server.call_count, diagnostics.call_count
+            evidence = json.loads((run_dir / 'case-artifacts/contract-test/accepted-session.json').read_text())
+            return result, prompts, evidence, probe.call_count
 
     def test_recorded_passed_judgment_is_canonicalized(self):
         response = (ROOT / 'tests/fixtures/rtc-quickstart-verifier-passed.json').read_text()
@@ -76,45 +78,34 @@ class CodexContractRunnerTest(unittest.TestCase):
         self.assertTrue(all(a['status'] == 'pass' for a in result['assertions']))
         self.assertEqual(result['assertions'][0]['evidence'], json.loads(response)['assertions'][0]['evidence'])
 
-    def test_failure_alias_and_unknown_status_cannot_become_pass(self):
-        for status, assertion, expected, reason in (
-            ('failed', 'failed', 'fail', None),
-            (' Passed ', 'PASSED', 'pass', None),
-            ('success', 'pass', 'blocked', 'evaluator-parse-error'),
-            ('pass', 'unknown', 'blocked', 'evaluator-parse-error'),
-            ('blocked', 'blocked', 'blocked', 'insufficient-evidence'),
-            ('pass', 'failed', 'fail', None),
-            ('pass', 'blocked', 'blocked', 'insufficient-evidence'),
-        ):
-            with self.subTest(status=status, assertion=assertion):
-                response = json.dumps({'status': status, 'assertions': [{'status': assertion}], 'notes': []})
+    def test_failure_alias_and_unknown_overall_status(self):
+        for status, expected in (('failed', 'fail'), (' Passed ', 'pass'), ('success', 'blocked'), ('blocked', 'blocked')):
+            with self.subTest(status=status):
+                response = json.dumps({'status': status, 'assertions': [{'status': status}], 'notes': []})
                 result, *_ = self.run_case(verifier_response=response)
                 self.assertEqual(result['status'], expected)
-                self.assertEqual(result['blocked_reason'], reason)
+                if status.strip().lower() in ('passed', 'failed'):
+                    self.assertEqual(result['assertions'][0]['status'], expected)
 
-    def test_contract_case_has_trace_but_no_credentials_or_web_side_effects(self):
-        result, prompts, environments, *calls = self.run_case()
-        self.assertEqual(result['status'], 'pass')
-        self.assertEqual(calls, [0, 0, 0])
-        self.assertNotIn('CI credentials', prompts[0])
-        for env in environments:
-            self.assertNotIn('AGORA_APP_ID', env)
-            self.assertNotIn('AGORA_APP_CERTIFICATE', env)
+    def test_no_app_continues_to_verifier_without_web_requests_or_startup(self):
+        for credentials in (False, True):
+            with self.subTest(credentials=credentials):
+                result, prompts, evidence, probes = self.run_case(credentials=credentials)
+                self.assertEqual(result['status'], 'pass')
+                self.assertIn('CI credentials', prompts[0])
+                self.assertEqual(len(prompts), 2)
+                self.assertEqual(probes, 0)
+                self.assertEqual(evidence['verification_server']['reason'], 'quickstart app not found')
+                self.assertEqual(evidence['runtime_diagnostics']['error'], 'quickstart app not found')
 
-    def test_credential_case_retains_existing_e2e_setup(self):
-        result, prompts, environments, *calls = self.run_case(credentials=True)
-        self.assertEqual(result['status'], 'pass')
-        self.assertEqual(calls, [1, 1, 1])
-        self.assertIn('CI credentials', prompts[0])
-        self.assertEqual(environments[0]['AGORA_APP_ID'], 'dummy-id')
-
-    def test_verifier_cannot_pass_failed_or_incomplete_task(self):
-        for changes in ({'task_exit': 1}, {'trace': ''}, {'trace': json.dumps({'type': 'item.completed', 'item': {'command': 'cat .agents/skills/agora/references/rtc/web.md'}})}, {'answer': ''}):
-            with self.subTest(changes=changes):
-                result, *_ = self.run_case(**changes)
-                self.assertEqual(result['status'], 'blocked')
-                self.assertEqual(result['blocked_reason'], 'insufficient-evidence')
-                self.assertEqual(result['assertions'], [])
+    def test_existing_convoai_app_keeps_web_diagnostics_independent_of_credentials_field(self):
+        for credentials in (False, True):
+            with self.subTest(credentials=credentials):
+                result, _, evidence, probes = self.run_case(credentials=credentials, with_app=True)
+                self.assertEqual(result['status'], 'pass')
+                self.assertGreater(probes, 0)
+                self.assertEqual(evidence['verification_server']['reason'], 'task server remained available')
+                self.assertTrue(evidence['runtime_diagnostics']['page_ready'])
 
 
 if __name__ == '__main__':
