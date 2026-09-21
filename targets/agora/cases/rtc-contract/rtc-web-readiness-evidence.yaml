@@ -1,0 +1,55 @@
+case_id: rtc-web-readiness-evidence
+title: User-reported HTTP readiness is not observed runtime or media proof
+input:
+  user_prompt: I installed the Agora Web video-call Quickstart. Doctor passed, the env file exists, and
+    localhost returns HTTP 200. Are we done? I have not tried the call. You have not run any commands
+    or checked the app in this session. Assess only this report; do not start or inspect the app.
+  locale: en-US
+setup: {}
+verification:
+- This case evaluates Web routing and evidence attribution only. Do not install dependencies, launch servers,
+  open the demo, or request camera/microphone access.
+- Read the accepted task trace and final answer. Cite actual completed file-read/tool evidence; a file
+  path merely mentioned in the answer is not proof of consultation.
+- If the task trace is unavailable or incomplete, mark blocked with insufficient-evidence. With a complete
+  trace, an observed wrong route or missing required consultation is a failure.
+assert:
+  summary: User-reported HTTP readiness is not observed runtime or media proof
+  required:
+  - description: The task consults the relevant RTC reference.
+    pass_criteria:
+    - The accepted task trace shows successful consultation of .agents/skills/agora/references/rtc/quickstarts.md.
+      Reading it together with other references is acceptable.
+    fail_signals:
+    - A complete accepted trace shows no consultation of the required reference.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  - description: The answer respects the requested Web workflow and evidence boundary.
+    pass_criteria:
+    - Attributes the supplied observations to the user and does not mark app_running as Agent-observed
+      passed.
+    - Keeps user_experience_verified pending and explains that successful bidirectional audio/video requires
+      current user evidence.
+    - Does not invent a URL, claim complete RTC First Success, or require a particular tabs/windows testing
+      setup.
+    fail_signals:
+    - Claims the agent has verified the running app based only on the user report.
+    - Claims a successful call or complete First Success from Doctor, env files, or HTTP 200.
+    evidence_scope:
+    - task-agent-raw.jsonl
+    - final-answer.txt
+  - description: The task respects the requested explanation-only scope.
+    pass_criteria:
+    - The task reads references and answers without installing dependencies, scaffolding an app, starting
+      servers, joining a call, or mutating remote resources.
+    fail_signals:
+    - Observed execution of setup, server startup, media activation, or remote mutations.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  forbidden: []
+notes:
+  why_it_matters: Protect RTC Web routing and evidence attribution without claiming end-to-end or real-media
+    verification.
+  likely_fix_files:
+  - .agents/skills/agora/references/rtc/README.md
+  - .agents/skills/agora/references/rtc/quickstarts.md

@@ -8,6 +8,7 @@ default_suites:
   - "bootstrap"
   - "routing"
   - "workflow"
+  - "rtc-contract"
 
 suite_root: "cases"
 
@@ -29,3 +30,4 @@ focus_areas:
   - "bootstrap"
   - "routing"
   - "workflow"
+  - "rtc-contract"

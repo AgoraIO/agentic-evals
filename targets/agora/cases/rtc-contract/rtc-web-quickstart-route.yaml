@@ -1,0 +1,53 @@
+case_id: rtc-web-quickstart-route
+title: New Web video demo chooses the official Quickstart
+input:
+  user_prompt: I want to build a working Agora Web one-to-one video-call demo from scratch. I have no
+    existing project. Explain the approach you would take, but do not install dependencies, scaffold an
+    app, start servers, or change remote resources in this turn.
+  locale: en-US
+setup: {}
+verification:
+- This case evaluates Web routing and evidence attribution only. Do not install dependencies, launch servers,
+  open the demo, or request camera/microphone access.
+- Read the accepted task trace and final answer. Cite actual completed file-read/tool evidence; a file
+  path merely mentioned in the answer is not proof of consultation.
+- If the task trace is unavailable or incomplete, mark blocked with insufficient-evidence. With a complete
+  trace, an observed wrong route or missing required consultation is a failure.
+assert:
+  summary: New Web video demo chooses the official Quickstart
+  required:
+  - description: The task consults the relevant RTC reference.
+    pass_criteria:
+    - The accepted task trace shows successful consultation of .agents/skills/agora/references/rtc/quickstarts.md.
+      Reading it together with other references is acceptable.
+    fail_signals:
+    - A complete accepted trace shows no consultation of the required reference.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  - description: The answer respects the requested Web workflow and evidence boundary.
+    pass_criteria:
+    - The answer chooses the official Agora CLI nextjs template with the video-call scenario as the starting
+      point.
+    - The answer treats setup and app startup as separate from user-confirmed bidirectional media; it
+      does not claim any setup or call has already succeeded.
+    fail_signals:
+    - Proposes a replacement app or an SDK-first scaffold instead of the official Quickstart.
+    - Claims RTC First Success or a working call without current evidence.
+    evidence_scope:
+    - task-agent-raw.jsonl
+    - final-answer.txt
+  - description: The task respects the requested explanation-only scope.
+    pass_criteria:
+    - The task reads references and answers without installing dependencies, scaffolding an app, starting
+      servers, joining a call, or mutating remote resources.
+    fail_signals:
+    - Observed execution of setup, server startup, media activation, or remote mutations.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  forbidden: []
+notes:
+  why_it_matters: Protect RTC Web routing and evidence attribution without claiming end-to-end or real-media
+    verification.
+  likely_fix_files:
+  - .agents/skills/agora/references/rtc/README.md
+  - .agents/skills/agora/references/rtc/quickstarts.md

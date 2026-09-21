@@ -1,0 +1,51 @@
+case_id: rtc-native-ios-route
+title: A native iOS request keeps the native platform route
+input:
+  user_prompt: I want to build an Agora video-call demo for native iOS in Swift from scratch. Explain
+    the approach you would take, but do not install dependencies, scaffold an app, start servers, or change
+    remote resources in this turn.
+  locale: en-US
+setup: {}
+verification:
+- This case evaluates native iOS routing only. Do not build or run an iOS app, install dependencies, launch
+  a Web demo, or request camera/microphone access.
+- Read the accepted task trace and final answer. Cite actual completed file-read/tool evidence; a file
+  path merely mentioned in the answer is not proof of consultation.
+- If the task trace is unavailable or incomplete, mark blocked with insufficient-evidence. With a complete
+  trace, an observed wrong route or missing required consultation is a failure.
+assert:
+  summary: A native iOS request keeps the native platform route
+  required:
+  - description: The task consults the relevant RTC reference.
+    pass_criteria:
+    - The accepted task trace shows successful consultation of .agents/skills/agora/references/rtc/ios.md.
+      Reading it together with other references is acceptable.
+    fail_signals:
+    - A complete accepted trace shows no consultation of the required reference.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  - description: The answer preserves the explicit native iOS platform.
+    pass_criteria:
+    - Chooses the native iOS RTC SDK and Swift implementation path using the iOS reference.
+    - Does not require a Next.js or other Web video-call baseline before native iOS work.
+    fail_signals:
+    - Routes the requested native iOS demo to Next.js, a WebView, or React Native instead.
+    - Requires Web Quickstart onboarding or Web First Success before native iOS implementation.
+    evidence_scope:
+    - task-agent-raw.jsonl
+    - final-answer.txt
+  - description: The task respects the requested explanation-only scope.
+    pass_criteria:
+    - The task reads references and answers without installing dependencies, scaffolding an app, starting
+      servers, joining a call, or mutating remote resources.
+    fail_signals:
+    - Observed execution of setup, server startup, media activation, or remote mutations.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  forbidden: []
+notes:
+  why_it_matters: The Web First Success workflow must not override an explicitly requested native platform.
+    This case does not verify iOS compilation or media.
+  likely_fix_files:
+  - .agents/skills/agora/references/rtc/README.md
+  - .agents/skills/agora/references/rtc/ios.md
