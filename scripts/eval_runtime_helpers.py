@@ -235,9 +235,7 @@ def snapshot_quickstart_env_files(workspace: str | Path) -> dict[str, dict[str, 
             continue
         if not isinstance(package, dict) or package.get("name") != "convoai-quickstart-web-nextjs":
             continue
-        # Match the effective env file: .env.local takes precedence over .env.
-        names = [".env.local"] if ".env.local" in files else [".env"]
-        for name in names:
+        for name in (".env", ".env.local"):
             path = Path(directory) / name
             if name not in files or path.is_symlink():
                 continue

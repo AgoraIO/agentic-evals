@@ -23,8 +23,10 @@ All runners should preserve `pass`/`fail`/`blocked` semantics and case artifact 
 - Credential-write provenance uses in-memory snapshots taken immediately before
   and after the task process, before starting verification. New or changed env
   files in the detected quickstart must contain both required non-placeholder
-  Agora keys; `.env.local` takes precedence over `.env`. This covers CLI,
-  shell, and editor writes without trusting command text or pre-existing files.
+  Agora keys. Both `.env` and `.env.local` in the detected quickstart are
+  recorded independently. Snapshots establish file-write provenance; credential
+  and runtime assertions still require independent verification. This covers
+  CLI, shell, and editor writes without trusting command text or pre-existing files.
 - Snapshots exclude dependency directories and symlinks. Credential values and
   fingerprints are never persisted; artifacts contain only the resulting facts.
 - Reports accept both `summary`/`evidence` and `description`/`notes` assertion

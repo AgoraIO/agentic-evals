@@ -83,15 +83,26 @@ class EvalRuntimeHelpersTest(unittest.TestCase):
             self.assertTrue(extract_codex_task_runtime_evidence(
                 "", before, snapshot_quickstart_env_files(workspace))["demo_env_file_written"])
 
-    def test_env_snapshot_does_not_accept_unrelated_env_or_shadowed_values(self):
+    def test_env_snapshot_accepts_either_file_when_both_exist(self):
+        for filename in (".env", ".env.local"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                (workspace / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
+                before = snapshot_quickstart_env_files(workspace)
+                for name in (".env", ".env.local"):
+                    (workspace / name).write_text("NEXT_PUBLIC_DEBUG=true\n")
+                (workspace / filename).write_text(
+                    "NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=test-cert\n")
+                after = snapshot_quickstart_env_files(workspace)
+                self.assertEqual(set(after), {".env", ".env.local"})
+                self.assertTrue(extract_codex_task_runtime_evidence("", before, after)["demo_env_file_written"])
+
+    def test_env_snapshot_excludes_unrelated_env_files(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            (workspace / ".env").write_text("NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=test-cert\n")
+            (workspace / ".env").write_text(
+                "NEXT_PUBLIC_AGORA_APP_ID=test-id\nNEXT_AGORA_APP_CERTIFICATE=test-cert\n")
             self.assertEqual(snapshot_quickstart_env_files(workspace), {})
-            (workspace / "package.json").write_text('{"name":"convoai-quickstart-web-nextjs"}')
-            (workspace / ".env.local").write_text("NEXT_PUBLIC_AGORA_APP_ID=\n")
-            after = snapshot_quickstart_env_files(workspace)
-            self.assertFalse(extract_codex_task_runtime_evidence("", {}, after)["demo_env_file_written"])
 
     def test_env_snapshot_excludes_symlinks_and_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
