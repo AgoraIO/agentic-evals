@@ -82,3 +82,19 @@
 
 - [Evaluator Runtimes](L2/evaluator_runtimes.md) - Runtime execution workflow details.
 - [Case Workspace Lifecycle](L2/case_workspace_lifecycle.md) - Workspace-attempt and isolation workflow details.
+
+## RTC Contract Suite
+
+`targets/agora/cases/rtc-contract/suite.yaml` contains six explanation-only cases:
+new Web video Quickstart routing, focused SDK questions, post-baseline screen sharing,
+audio-only scope, user-reported readiness evidence, and native iOS routing. It does not
+verify startup, native compilation, or media.
+
+Run it with the direct Codex runner using the existing execution flow. Credential
+preparation and Web diagnostics are unchanged: when no Quickstart app exists, the
+Web helpers return without starting a server. This observation is not itself a
+case failure; the verifier judges the case's assertions using the redacted task
+trace and final answer. Missing evidence must be judged blocked by the verifier.
+
+Publish a tested agentic-evals commit first, then update the skills repository eval pin
+and enable this suite in PR checks. Keep the existing ConvoAI regression case alongside it.

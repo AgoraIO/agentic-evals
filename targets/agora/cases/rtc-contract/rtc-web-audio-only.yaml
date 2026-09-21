@@ -1,0 +1,51 @@
+case_id: rtc-web-audio-only
+title: An audio-only request preserves its media scope
+input:
+  user_prompt: I want to build an Agora Web audio-only call demo from scratch. There must be no camera
+    or video requirement. Explain the approach you would take, but do not install dependencies, scaffold
+    an app, start servers, or change remote resources in this turn.
+  locale: en-US
+setup: {}
+verification:
+- This case evaluates Web routing and evidence attribution only. Do not install dependencies, launch servers,
+  open the demo, or request camera/microphone access.
+- Read the accepted task trace and final answer. Cite actual completed file-read/tool evidence; a file
+  path merely mentioned in the answer is not proof of consultation.
+- If the task trace is unavailable or incomplete, mark blocked with insufficient-evidence. With a complete
+  trace, an observed wrong route or missing required consultation is a failure.
+assert:
+  summary: An audio-only request preserves its media scope
+  required:
+  - description: The task consults the relevant RTC reference.
+    pass_criteria:
+    - The accepted task trace shows successful consultation of .agents/skills/agora/references/rtc/web.md.
+      Reading it together with other references is acceptable.
+    fail_signals:
+    - A complete accepted trace shows no consultation of the required reference.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  - description: The answer respects the requested Web workflow and evidence boundary.
+    pass_criteria:
+    - Chooses the RTC Web reference for an audio-only implementation.
+    - Does not require the Next.js video-call First Success workflow or camera setup.
+    fail_signals:
+    - Mandates a video-call Quickstart before doing audio-only work.
+    - Requires enabling the camera or confirming video to finish the requested audio-only setup.
+    evidence_scope:
+    - task-agent-raw.jsonl
+    - final-answer.txt
+  - description: The task respects the requested explanation-only scope.
+    pass_criteria:
+    - The task reads references and answers without installing dependencies, scaffolding an app, starting
+      servers, joining a call, or mutating remote resources.
+    fail_signals:
+    - Observed execution of setup, server startup, media activation, or remote mutations.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  forbidden: []
+notes:
+  why_it_matters: Protect RTC Web routing and evidence attribution without claiming end-to-end or real-media
+    verification.
+  likely_fix_files:
+  - .agents/skills/agora/references/rtc/README.md
+  - .agents/skills/agora/references/rtc/web.md

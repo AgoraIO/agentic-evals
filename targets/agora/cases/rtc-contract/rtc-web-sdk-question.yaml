@@ -1,0 +1,50 @@
+case_id: rtc-web-sdk-question
+title: An explicit Web SDK question skips onboarding
+input:
+  user_prompt: In Agora RTC Web, how should I handle separate audio and video user-published events? Give
+    a focused explanation; do not create or run a demo.
+  locale: en-US
+setup: {}
+verification:
+- This case evaluates Web routing and evidence attribution only. Do not install dependencies, launch servers,
+  open the demo, or request camera/microphone access.
+- Read the accepted task trace and final answer. Cite actual completed file-read/tool evidence; a file
+  path merely mentioned in the answer is not proof of consultation.
+- If the task trace is unavailable or incomplete, mark blocked with insufficient-evidence. With a complete
+  trace, an observed wrong route or missing required consultation is a failure.
+assert:
+  summary: An explicit Web SDK question skips onboarding
+  required:
+  - description: The task consults the relevant RTC reference.
+    pass_criteria:
+    - The accepted task trace shows successful consultation of .agents/skills/agora/references/rtc/web.md.
+      Reading it together with other references is acceptable.
+    fail_signals:
+    - A complete accepted trace shows no consultation of the required reference.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  - description: The answer respects the requested Web workflow and evidence boundary.
+    pass_criteria:
+    - Answers the audio/video event handling question using the Web SDK reference.
+    - Does not require Quickstart setup or a working-call baseline before answering the focused SDK question.
+    fail_signals:
+    - Defers the answer until onboarding or a two-way call is completed.
+    - Starts Quickstart setup instead of answering the question.
+    evidence_scope:
+    - task-agent-raw.jsonl
+    - final-answer.txt
+  - description: The task respects the requested explanation-only scope.
+    pass_criteria:
+    - The task reads references and answers without installing dependencies, scaffolding an app, starting
+      servers, joining a call, or mutating remote resources.
+    fail_signals:
+    - Observed execution of setup, server startup, media activation, or remote mutations.
+    evidence_scope:
+    - task-agent-raw.jsonl
+  forbidden: []
+notes:
+  why_it_matters: Protect RTC Web routing and evidence attribution without claiming end-to-end or real-media
+    verification.
+  likely_fix_files:
+  - .agents/skills/agora/references/rtc/README.md
+  - .agents/skills/agora/references/rtc/web.md
