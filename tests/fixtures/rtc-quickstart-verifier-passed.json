@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "assertions": [
+    {
+      "description": "The task consults the relevant RTC reference.",
+      "status": "passed",
+      "evidence": "Trace lines 7-10 show successful reads of .agents/skills/agora/references/rtc/README.md and quickstarts.md."
+    },
+    {
+      "description": "The answer respects the requested Web workflow and evidence boundary.",
+      "status": "passed",
+      "evidence": "Trace line 11 selects the official nextjs + video-call Quickstart and does not claim setup or call success."
+    },
+    {
+      "description": "The task respects the requested explanation-only scope.",
+      "status": "passed",
+      "evidence": "The complete trace shows only reference reads and an answer; runner facts confirm no clone, env write, dev command, or successful GET."
+    }
+  ],
+  "notes": "Workspace contains only skill/reference material. No disallowed installation, scaffolding, server startup, media activation, or remote mutation was observed."
+}

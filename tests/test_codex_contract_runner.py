@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CodexContractRunnerTest(unittest.TestCase):
-    def run_case(self, *, credentials=False, task_exit=0, trace=None, answer='Use the Web reference.'):
+    def run_case(self, *, credentials=False, task_exit=0, trace=None, answer='Use the Web reference.', verifier_response=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workspace = root / 'workspace'
@@ -52,7 +52,7 @@ class CodexContractRunnerTest(unittest.TestCase):
                 if trace:
                     self.assertIn('cat .agents/skills/agora/references/rtc/web.md', saved_trace.read_text())
                 self.assertNotIn('dummy-cert', saved_trace.read_text())
-                output.write_text(json.dumps({'status': 'pass', 'assertions': [], 'notes': []}))
+                output.write_text(verifier_response if verifier_response is not None else json.dumps({'status': 'pass', 'assertions': [], 'notes': []}))
                 return subprocess.CompletedProcess(args, 0, '', '')
 
             with patch.dict(os.environ, {'RUN_DIR': str(run_dir), 'AGORA_APP_ID': 'dummy-id', 'AGORA_APP_CERTIFICATE': 'dummy-cert'}), \
@@ -67,6 +67,30 @@ class CodexContractRunnerTest(unittest.TestCase):
                 runpy.run_path(str(ROOT / 'scripts/run_codex_eval.py'))
             result = json.loads((run_dir / 'case-results/contract-test.json').read_text())
             return result, prompts, environments, seed.call_count, server.call_count, diagnostics.call_count
+
+    def test_recorded_passed_judgment_is_canonicalized(self):
+        response = (ROOT / 'tests/fixtures/rtc-quickstart-verifier-passed.json').read_text()
+        result, *_ = self.run_case(verifier_response=response)
+        self.assertEqual(result['status'], 'pass')
+        self.assertIsNone(result['blocked_reason'])
+        self.assertTrue(all(a['status'] == 'pass' for a in result['assertions']))
+        self.assertEqual(result['assertions'][0]['evidence'], json.loads(response)['assertions'][0]['evidence'])
+
+    def test_failure_alias_and_unknown_status_cannot_become_pass(self):
+        for status, assertion, expected, reason in (
+            ('failed', 'failed', 'fail', None),
+            (' Passed ', 'PASSED', 'pass', None),
+            ('success', 'pass', 'blocked', 'evaluator-parse-error'),
+            ('pass', 'unknown', 'blocked', 'evaluator-parse-error'),
+            ('blocked', 'blocked', 'blocked', 'insufficient-evidence'),
+            ('pass', 'failed', 'fail', None),
+            ('pass', 'blocked', 'blocked', 'insufficient-evidence'),
+        ):
+            with self.subTest(status=status, assertion=assertion):
+                response = json.dumps({'status': status, 'assertions': [{'status': assertion}], 'notes': []})
+                result, *_ = self.run_case(verifier_response=response)
+                self.assertEqual(result['status'], expected)
+                self.assertEqual(result['blocked_reason'], reason)
 
     def test_contract_case_has_trace_but_no_credentials_or_web_side_effects(self):
         result, prompts, environments, *calls = self.run_case()

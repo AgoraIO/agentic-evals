@@ -79,6 +79,14 @@ def build_task_prompt(case, workspace, credentials, needs_credentials):
     )
 
 
+def normalize_verifier_status(value):
+    # Accept the observed tense variants, but never infer success from unknown text.
+    return {
+        "pass": "pass", "passed": "pass",
+        "fail": "fail", "failed": "fail", "blocked": "blocked",
+    }.get(str(value).strip().lower())
+
+
 def build_verifier_prompt(
     case, workspace, answer, assertions, verification, diagnostics, task_facts, server, trace_path
 ):
@@ -101,7 +109,9 @@ def build_verifier_prompt(
         "- Treat unavailable evidence as blocked rather than inferring pass.\n\n"
         f"Required verification actions:\n{verification}\n\n"
         f"Assertions:\n{assertions}\n\n"
-        "Return only JSON with status, assertions, and notes."
+        "Return only JSON with status, assertions, and notes. "
+        "Both the overall status and every assertion status must be exactly pass, fail, or blocked; do not use passed or failed. "
+        "Use a list of strings for notes and include blocked_reason when blocked."
     )
 
 
@@ -202,14 +212,39 @@ for case in CASES:
     }
     judgment = find_judgment_json(safe_verifier_answer) if verifier_exit == 0 else None
     if judgment:
+        status = normalize_verifier_status(judgment.get("status"))
+        invalid_status = status is None
+        judgment["status"] = status or "blocked"
+        assertions = judgment.get("assertions", [])
+        if not isinstance(assertions, list):
+            assertions = []
+            invalid_status = True
+        normalized_assertions = []
+        for assertion in assertions:
+            if not isinstance(assertion, dict):
+                invalid_status = True
+                continue
+            assertion_status = normalize_verifier_status(assertion.get("status"))
+            invalid_status = invalid_status or assertion_status is None
+            normalized_assertions.append({**assertion, "status": assertion_status or "blocked"})
+        judgment["assertions"] = normalized_assertions
         judgment, browser_blocked = downgrade_browser_infrastructure_failure(
             judgment, safe_verifier_answer + "\n" + safe_verifier_raw
         )
-        status = str(judgment.get("status", "blocked")).lower()
+        statuses = {judgment["status"], *(a["status"] for a in judgment["assertions"])}
+        if invalid_status:
+            status, blocked_reason = "blocked", "evaluator-parse-error"
+        elif "fail" in statuses:
+            status, blocked_reason = "fail", None
+        elif "blocked" in statuses:
+            status = "blocked"
+            blocked_reason = "environment" if browser_blocked else (judgment.get("blocked_reason") or "insufficient-evidence")
+        else:
+            status, blocked_reason = "pass", None
         result.update({
-            "status": status if status in {"pass", "fail", "blocked"} else "blocked",
-            "blocked_reason": "environment" if browser_blocked else None,
-            "assertions": judgment.get("assertions", []),
+            "status": status,
+            "blocked_reason": blocked_reason,
+            "assertions": judgment["assertions"],
             "notes": judgment.get("notes", []),
         })
 
