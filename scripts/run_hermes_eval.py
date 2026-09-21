@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_runtime_helpers import (
     collect_web_runtime_diagnostics,
+    collect_hermes_session_evidence,
     classify_evaluator_failure,
     create_case_workspace,
     downgrade_browser_infrastructure_failure,
@@ -61,9 +62,15 @@ def run_hermes(prompt, timeout=600, label="agent", cwd=None):
             env=hermes_env(), cwd=cwd
         )
         return result.stdout, result.returncode, result.stderr
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         print(f"  [{label}] TIMEOUT after {timeout}s")
-        return "", -1, f"TIMEOUT after {timeout}s"
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return stdout, -1, stderr + f"\nTIMEOUT after {timeout}s"
 
 
 def run_evaluator(prompt, timeout=300):
@@ -155,6 +162,10 @@ for case in cases:
     if safe_task_stderr:
         (art_dir / "task-agent-stderr.txt").write_text(safe_task_stderr)
 
+    task_session = collect_hermes_session_evidence(task_stderr or "")
+    task_session_path = (art_dir / "task-session.json").resolve()
+    task_session_path.write_text(json.dumps(task_session, indent=2) + "\n")
+
     task_response = safe_task_stdout
     print(f"Phase 1 response (first 500):\n{task_response[:500]}")
     (art_dir / "final-answer.txt").write_text(task_response + "\n")
@@ -205,18 +216,28 @@ for case in cases:
         f"The agent responded:\n{task_response[:1500]}\n\n"
         f"The agent's workspace is at: {attempt_ws}\n"
         f"Files in workspace: {ws_files.count(chr(10))}\n\n"
+        f"Task session ID: {task_session['session_id']}\n"
+        f"Task process exit code: {task_exit}\n"
+        f"Task session evidence status: {task_session['status']}\n"
+        f"Task session evidence reason: {task_session['reason']}\n"
+        f"Task tool calls and results: {task_session_path}\n"
+        "Read that runner-owned evidence file before judging clone, env-write, or start provenance. "
+        "Match tool_call_id with the call id and inspect the result for success; "
+        "a pending/failed call or final-answer claim alone is not proof of execution. "
+        "If session evidence is unavailable, mark those assertions blocked for insufficient evidence, "
+        "rather than inferring task actions from existing files.\n\n"
         f"Task-server runtime diagnostics:\n{json.dumps(runtime_diagnostics, indent=2)}\n"
         f"Runner verification-server facts:\n{json.dumps(verification_server_facts, indent=2)}\n"
         f"Runner verification diagnostics:\n{json.dumps(verification_diagnostics, indent=2)}\n\n"
         f"IMPORTANT: Verify by inspecting the workspace directly:\n"
-        f"- Use task-server runtime diagnostics to determine whether the task agent started a server.\n"
+        f"- Use the task session tool calls/results to establish the start command; task-server diagnostics corroborate runtime availability.\n"
         f"- Use the runner verification server for browser and invite-flow checks; it is isolated from the task agent's terminal.\n"
         f"- Run these checks yourself before judging.\n\n"
         f"Required verification actions:\n{verification_text}\n\n"
-        f"Check these assertions and tell me pass or fail for each:\n{assertions_text}\n\n"
+        f"Check these assertions and tell me pass, fail, or blocked for each:\n{assertions_text}\n\n"
         f"Write your answer as a JSON object with this structure:\n"
-        '{"case_id":"' + cid + '","status":"pass or fail",'
-        '"assertions":[{"summary":"description","status":"pass or fail","evidence":["what you observed"]}],'
+        '{"case_id":"' + cid + '","status":"pass, fail, or blocked",'
+        '"assertions":[{"summary":"description","status":"pass, fail, or blocked","evidence":["what you observed"]}],'
         '"notes":["any observations"]}\n\n'
         "Please run the verification commands and write the JSON now."
     )
@@ -274,7 +295,11 @@ for case in cases:
             "status": status if status in {"pass", "fail", "blocked"} else "blocked",
             "assertions": parsed.get("assertions", []),
             "notes": parsed.get("notes", []),
-            "blocked_reason": "environment" if browser_blocked else None,
+            "blocked_reason": (
+                "environment" if browser_blocked else
+                "insufficient-evidence" if status == "blocked" and task_session["status"] == "unavailable"
+                else parsed.get("blocked_reason")
+            ),
         })
 
     safe_case_result = redact_sensitive_text(json.dumps(case_result, indent=2))
@@ -284,6 +309,10 @@ for case in cases:
 
     # Evidence bundle
     evidence = {
+        "task_session_id": task_session["session_id"],
+        "task_session_evidence_status": task_session["status"],
+        "task_session_path": "task-session.json",
+        "task_agent_exit_code": task_exit,
         "task_agent_output": safe_task_stdout[:50000],
         "task_agent_stderr": safe_task_stderr[:10000],
         "evaluator_output": safe_eval_response[:50000],

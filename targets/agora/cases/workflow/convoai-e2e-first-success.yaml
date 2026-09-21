@@ -25,7 +25,9 @@ setup:
 verification:
   - "For browser assertions, use only the installed agent-browser CLI through shell commands, with `--session eval-browser` on every command."
   - "Open http://localhost:3000, activate Start Conversation, and inspect the resulting page state."
-  - "Inspect agent-browser network requests for /api/invite-agent; do not infer invite success from the landing-page GET alone."
+  - "Find the request ID for the POST /api/invite-agent triggered by the Start Conversation click using `agent-browser --session eval-browser network requests --json`."
+  - "Read that exact request with `agent-browser --session eval-browser network request <request-id> --json` and inspect its response body. The non-JSON output can show only the URL; do not treat that output as proof the response body is unavailable."
+  - "Use the observed browser request, not a separate replayed POST, to verify invite success; do not infer success from the landing-page GET alone."
   - "Treat the invite flow as successful only when its observed response has status 200 and state `RUNNING`."
   - "If agent-browser infrastructure is unavailable, report blocked(environment) rather than failing the demo."
 
